@@ -128,3 +128,27 @@ td.r-hider { color: var(--hider); } td.r-seeker { color: var(--seeker); }
 @media (max-width: 700px) {
   #chat { width: 200px; } #bars { width: 150px; } .ab { width: 50px; height: 50px; } #timer { font-size: 24px; } #role-banner, #counter { font-size: 11px; padding: 6px 10px; }
 }
+
+/* --- V2: Fadenkreuz, Pointer-Lock-Hinweis, Malmodus --- */
+#crosshair { position: fixed; left: 50%; top: 50%; width: 22px; height: 22px; margin: -11px 0 0 -11px; pointer-events: none; z-index: 12; }
+#crosshair::before, #crosshair::after { content: ""; position: absolute; background: rgba(255,255,255,0.9); box-shadow: 0 0 3px #000; }
+#crosshair::before { left: 10px; top: 0; width: 2px; height: 22px; }
+#crosshair::after { left: 0; top: 10px; width: 22px; height: 2px; }
+#crosshair.seeker::before, #crosshair.seeker::after { background: var(--seeker); }
+#crosshair[hidden] { display: none; }
+#lockhint { position: fixed; left: 50%; bottom: 110px; transform: translateX(-50%); background: rgba(0,0,0,0.6); border: 1px solid var(--line); padding: 8px 14px; border-radius: 999px; font-size: 13px; z-index: 12; pointer-events: none; }
+#lockhint[hidden] { display: none; }
+#paint-panel { position: fixed; right: 16px; top: 70px; width: 270px; background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 14px 16px; z-index: 15; display: flex; flex-direction: column; gap: 8px; }
+#paint-panel[hidden] { display: none; }
+#paint-panel h3 { margin: 0; font-size: 15px; letter-spacing: 0; text-transform: none; color: var(--text); }
+#paint-panel .row { display: flex; gap: 8px; align-items: center; }
+#paint-panel label { font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 8px; }
+#paint-panel input[type=range] { flex: 1; padding: 0; background: none; border: none; }
+#paint-panel .swatch { flex: 1; height: 38px; border-radius: 8px; border: 1px solid var(--line); display: flex; align-items: center; justify-content: center; font-size: 11px; color: #fff; text-shadow: 0 1px 2px #000; }
+#paint-panel .recent { display: flex; gap: 6px; flex-wrap: wrap; min-height: 24px; }
+#paint-panel .sw { width: 24px; height: 24px; padding: 0; border-radius: 6px; border: 1px solid var(--line); flex: 0 0 auto; }
+#paint-panel .hint { min-height: 1.4em; color: var(--accent2); }
+#paint-panel .small { margin: 0; font-size: 12px; }
+#paint-panel button.primary { padding: 8px; }
+body.painting #game canvas { cursor: crosshair; }
+body.painting #chat, body.painting #feed { display: none; }
