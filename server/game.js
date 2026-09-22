@@ -671,7 +671,7 @@ export class Game {
           grapple: r1(me.grappleCd), decoy: r1(me.decoyCd), scan: r1(me.scanCd),
           dash: r1(me.dashCd), catch: r1(me.catchCd),
         },
-        stun: r1(me.stunT), mark: r1(me.markT), respawn: r1(me.respawnT),
+        stun: r1(me.stunT), mark: r1(me.markT), respawn: r1(me.respawnT), dash: me.dashT > 0,
         vis: me.role === C.ROLE_HIDER ? Math.round(baseVisibility(this.map, me) * 100) / 100 : 1,
         grapple: me.grapple ? { ax: me.grapple.ax, ay: me.grapple.ay } : null,
         score: me.score, roundScore: Math.round(me.roundScore), catches: me.catches,
@@ -681,7 +681,7 @@ export class Game {
       splats: this.splats
         .filter((s) => Math.hypot(s.x - me.x, s.y - me.y) < C.VIEW_RADIUS)
         .map((s) => ({ x: r1(s.x), y: r1(s.y), c: s.color, t: r1(s.t), s: s.seed })),
-      scans: this.scans.map((s) => ({ x: r1(s.x), y: r1(s.y), r: r1(s.r) })),
+      scans: this.scans.map((s) => ({ id: s.id, x: r1(s.x), y: r1(s.y), r: r1(s.r) })),
       events,
     };
   }

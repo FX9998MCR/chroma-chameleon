@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Chroma Chameleon</title>
+<meta name="description" content="Online-Multiplayer-Versteckspiel: Chamäleons tarnen sich per Farbe und Stillstand, Jäger suchen sie mit Puls-Scans.">
+<meta name="theme-color" content="#0d1117">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Ccircle cx='32' cy='32' r='30' fill='%235c8056'/%3E%3Ccircle cx='24' cy='26' r='7' fill='%23fff'/%3E%3Ccircle cx='26' cy='27' r='3' fill='%23111'/%3E%3Cpath d='M40 40q10 4 6 14' stroke='%23e8c66a' stroke-width='5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="/css/style.css">
+<script type="importmap">
+{ "imports": { "three": "/vendor/three/three.module.js" } }
+</script>
+</head>
+<body>
+<div id="game"></div>
+<div id="labels"></div>
+
+<!-- Hauptmenue -->
+<section id="menu" class="overlay">
+  <div class="panel">
+    <h1><span class="logo"></span>Chroma Chameleon</h1>
+    <p class="tag">Tarne dich. Halte still. Werde nicht gefunden.</p>
+    <label class="field">
+      <span>Dein Name</span>
+      <input id="name" maxlength="16" autocomplete="off" spellcheck="false" placeholder="Chamäleon">
+    </label>
+    <div class="buttons">
+      <button id="btn-quick" class="primary">Schnellspiel</button>
+      <button id="btn-create">Privaten Raum erstellen</button>
+    </div>
+    <div class="joinrow">
+      <input id="code" maxlength="4" autocomplete="off" spellcheck="false" placeholder="RAUMCODE">
+      <button id="btn-join">Beitreten</button>
+    </div>
+    <p id="menu-error" class="error" hidden></p>
+    <details class="help">
+      <summary>So wird gespielt</summary>
+      <div class="help-grid">
+        <div>
+          <h3>Chamäleon</h3>
+          <ul>
+            <li><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> laufen · <kbd>Shift</kbd> sprinten (hinterlässt Farbspur!)</li>
+            <li><kbd>E</kbd> halten: Bodenfarbe aufnehmen</li>
+            <li><b>Stillhalten</b> + passende Farbe = fast unsichtbar</li>
+            <li><kbd>Rechtsklick</kbd> Zungenhaken zur Säule</li>
+            <li><kbd>Q</kbd> Köder absetzen – wer zuschlägt, ist kurz betäubt</li>
+          </ul>
+        </div>
+        <div>
+          <h3>Jäger</h3>
+          <ul>
+            <li><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> laufen · <kbd>Shift</kbd> Dash</li>
+            <li><kbd>Linksklick</kbd> Zungenschlag: fängt vor dir</li>
+            <li><kbd>Leertaste</kbd> Puls-Scan: verrät alles, was sich gerade bewegt hat</li>
+            <li>Nähe deckt auf: dicht ran, dann siehst du Umrisse</li>
+            <li>Gefangene Chamäleons werden zu Jägern</li>
+          </ul>
+        </div>
+      </div>
+      <p class="small">Runde: 15 s Vorbereitung (Jäger sind blind), dann 150 s Jagd. 2 – 24 Spieler. Bei 2 – 4 Spielern ein Jäger, bei 5 – 8 zwei, usw.</p>
+    </details>
+  </div>
+</section>
+
+<!-- Lobby -->
+<section id="lobby" class="overlay" hidden>
+  <div class="panel">
+    <h2>Raum <span id="lobby-code" title="Klicken zum Kopieren">----</span></h2>
+    <p class="small">Einladungslink: <a id="invite" href="#" target="_blank" rel="noopener"></a> <button id="btn-copy" class="mini">kopieren</button></p>
+    <ul id="lobby-players"></ul>
+    <p id="lobby-hint" class="small"></p>
+    <div class="buttons">
+      <button id="btn-ready" class="primary">Bereit</button>
+      <button id="btn-start" hidden>Runde starten</button>
+      <button id="btn-leave">Verlassen</button>
+    </div>
+  </div>
+</section>
+
+<!-- HUD -->
+<div id="hud" hidden>
+  <div id="hud-top">
+    <div id="role-banner"></div>
+    <div id="timer">0:00</div>
+    <div id="counter"></div>
+  </div>
+  <div id="hud-center"></div>
+  <div id="hud-bottom">
+    <div id="bars">
+      <div class="bar"><span class="bar-label">Ausdauer</span><div class="bar-track"><div id="stamina" class="bar-fill"></div></div></div>
+      <div class="bar" id="camo-bar"><span class="bar-label">Tarnung</span><div class="bar-track"><div id="camo" class="bar-fill camo"></div></div></div>
+    </div>
+    <div id="abilities"></div>
+    <div id="score">0</div>
+  </div>
+  <div id="feed"></div>
+  <div id="prep-blind" hidden>
+    <div class="blind-inner">
+      <h2>Augen zu …</h2>
+      <p>Die Chamäleons verstecken sich.</p>
+      <div id="blind-count">15</div>
+    </div>
+  </div>
+  <div id="caught" hidden>
+    <h2>Erwischt!</h2>
+    <p>Du wirst in <span id="caught-count">3</span> s Jäger.</p>
+  </div>
+  <div id="scoreboard" hidden>
+    <table><thead><tr><th>#</th><th>Name</th><th>Rolle</th><th>Runde</th><th>Gesamt</th></tr></thead><tbody></tbody></table>
+  </div>
+  <div id="roundend" hidden>
+    <h2 id="roundend-title"></h2>
+    <p id="roundend-sub"></p>
+    <table><thead><tr><th>#</th><th>Name</th><th>Rolle</th><th>Runde</th><th>Gesamt</th></tr></thead><tbody></tbody></table>
+    <p class="small">Nächste Runde in <span id="roundend-count">8</span> s</p>
+  </div>
+  <div id="chat">
+    <div id="chat-log"></div>
+    <input id="chat-input" maxlength="140" placeholder="Enter: Chat" autocomplete="off">
+  </div>
+  <div id="netinfo"></div>
+</div>
+
+<div id="disconnected" class="overlay" hidden>
+  <div class="panel"><h2>Verbindung getrennt</h2><p id="disc-reason"></p><button id="btn-reload" class="primary">Neu laden</button></div>
+</div>
+
+<script type="module" src="/js/main.js"></script>
+</body>
+</html>
