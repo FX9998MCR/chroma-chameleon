@@ -1,17 +1,16 @@
 // Autoritative Spielsimulation eines Raums.
-// Der Server rechnet alles selbst; Clients schicken nur Eingaben.
-// Sichtbarkeit wird HIER entschieden: Was ein Jaeger nicht sehen darf,
-// verlaesst den Server nicht (Schutz gegen Wallhacks).
+// Der Server rechnet Bewegung, Treffer und Runden; Clients schicken Eingaben.
+// Tarnung ist rein visuell: Jeder sieht jede Figur in Sichtweite - ob man sie
+// im Bild erkennt, entscheidet die Bemalung. Wie im Vorbild.
 
 import * as C from '../shared/constants.js';
-import { tileAt, tileColorAt, isSolidAt } from '../shared/map.js';
+import { isSolidAt, TILE_PX } from '../shared/map.js';
 import {
-  clamp, angleDiff, stepMovement, baseVisibility, visibilityForSeeker,
-  raycastSolid, slideMove,
+  angleDiff, stepMovement, raycast3D, rayHitsCylinder, dirFromAngles, slideMove, raycastSolid,
 } from '../shared/physics.js';
 
 const EMPTY_INPUT = Object.freeze({
-  up: false, down: false, left: false, right: false, sprint: false, absorb: false,
+  up: false, down: false, left: false, right: false, sprint: false, paint: false,
 });
 
 let nextEntityId = 1;
@@ -22,53 +21,47 @@ export function makePlayer(id, name) {
     id, name,
     role: C.ROLE_HIDER,
     alive: true,
-    x: 0, y: 0, vx: 0, vy: 0, aim: 0,
-    color: C.PALETTE[7].slice(),   // Start: neutrales Basalt, faellt ueberall auf
+    x: 0, y: 0, vx: 0, vy: 0,
+    yaw: 0, pitch: 0,              // Blickrichtung (Kamera)
+    pose: 0,                       // Index in POSES
+    painting: false,               // Malmodus aktiv (eingefroren)
+    paint: null,                   // letzte Bemalung: {png} oder {fill:[r,g,b]} oder null = weiss
+    avgColor: [245, 245, 245],     // Durchschnittsfarbe der Bemalung (fuer Bots)
     stillTime: 0,
-    shimmer: 0,
-    lastMoveT: 99,                 // Sekunden seit letzter deutlicher Bewegung
     stamina: C.STAMINA_MAX,
     staminaDelay: 0,
     sprinting: false,
-    absorbing: 0,
-    grapple: null,                 // {ax, ay, t}
-    grappleCd: 0, decoyCd: 0, scanCd: 0, dashCd: 0, catchCd: 0,
+    decoyCd: 0, dashCd: 0, shotCd: 0,
     dashT: 0, dashDir: 0,
     stunT: 0,
-    markT: 0,
     respawnT: 0,
     splatT: 0,
-    score: 0,                      // Gesamtpunkte ueber alle Runden
+    score: 0,
     roundScore: 0,
-    survivePts: 0,                 // Bruchteile fuer Sekundenpunkte
+    survivePts: 0,
     catches: 0,
-    seekerRounds: 0,               // Fairness bei der Rollenverteilung
+    seekerRounds: 0,
     bot: false,
     ready: false,
     input: { ...EMPTY_INPUT },
-    actions: { primary: false, decoy: false, grapple: false, scan: false, dash: false },
+    actions: { primary: false, decoy: false, dash: false, pose: false },
     seq: 0,
   };
 }
 
 export class Game {
-  /**
-   * @param {object} map   generierte Karte
-   * @param {object} opts  {rng: () => number}
-   */
   constructor(map, opts = {}) {
     this.map = map;
     this.rng = opts.rng ?? Math.random;
     this.players = new Map();
     this.phase = C.PHASE_LOBBY;
-    this.phaseTime = 0;         // verbleibende Sekunden der Phase
+    this.phaseTime = 0;
     this.round = 0;
     this.tick = 0;
     this.time = 0;
-    this.decoys = [];           // {id, x, y, color, owner, t}
-    this.splats = [];           // {x, y, color, t}
-    this.scans = [];            // {id, x, y, r, t, hit:Set}
-    this.events = [];           // seit letztem Snapshot
+    this.decoys = [];           // {id, x, y, yaw, pose, paint, avgColor, owner, t}
+    this.splats = [];           // Farbspuren am Boden {x, y, color, t, seed}
+    this.events = [];
     this.lastWinner = null;
     this.hidersTotal = 0;
     this.seekerSpawn = this.pickSeekerSpawn();
@@ -81,10 +74,7 @@ export class Game {
     p.x = s.x; p.y = s.y;
     this.players.set(id, p);
     this.pushEvent({ k: 'join', name });
-    // Wer mitten in einer Runde kommt, jagt mit - so wartet niemand.
-    if (this.phase === C.PHASE_PREP || this.phase === C.PHASE_HUNT) {
-      this.becomeSeeker(p, true);
-    }
+    if (this.phase === C.PHASE_PREP || this.phase === C.PHASE_HUNT) this.becomeSeeker(p, true);
     return p;
   }
 
@@ -100,19 +90,30 @@ export class Game {
     }
   }
 
-  setInput(id, inp, actions, aim, seq) {
+  setInput(id, inp, actions, look, seq) {
     const p = this.players.get(id);
     if (!p) return;
     p.input = {
       up: !!inp.up, down: !!inp.down, left: !!inp.left, right: !!inp.right,
-      sprint: !!inp.sprint, absorb: !!inp.absorb,
+      sprint: !!inp.sprint, paint: !!inp.paint,
     };
-    if (Number.isFinite(aim)) p.aim = aim;
-    if (Number.isFinite(seq)) p.seq = seq;
-    // Aktionen sind flankengesteuert: einmal gesetzt, bis verbraucht.
-    if (actions) {
-      for (const k of Object.keys(p.actions)) if (actions[k]) p.actions[k] = true;
+    if (look) {
+      if (Number.isFinite(look.yaw)) p.yaw = look.yaw;
+      if (Number.isFinite(look.pitch)) p.pitch = Math.max(-1.5, Math.min(1.5, look.pitch));
     }
+    if (Number.isFinite(seq)) p.seq = seq;
+    if (actions) for (const k of Object.keys(p.actions)) if (actions[k]) p.actions[k] = true;
+  }
+
+  /** Bemalung eines Spielers setzen (vom Client oder von einem Bot). */
+  setPaint(id, paint, avgColor) {
+    const p = this.players.get(id);
+    if (!p || p.role !== C.ROLE_HIDER) return false;
+    p.paint = paint;
+    if (Array.isArray(avgColor) && avgColor.length === 3) {
+      p.avgColor = avgColor.map((v) => Math.max(0, Math.min(255, Number(v) || 0)));
+    }
+    return true;
   }
 
   setReady(id, ready) {
@@ -132,7 +133,6 @@ export class Game {
     return s[(this.rng() * s.length) | 0];
   }
 
-  /** Jaeger starten gemeinsam an einem Punkt nahe der Kartenmitte. */
   pickSeekerSpawn() {
     const cx = C.WORLD_W / 2, cy = C.WORLD_H / 2;
     let best = null, bestD = Infinity;
@@ -143,7 +143,6 @@ export class Game {
     return best ?? { x: cx, y: cy };
   }
 
-  /** Startplatz fuer Chamaeleons: moeglichst weit weg vom Jaeger-Start. */
   hiderSpawn(used) {
     const cands = this.map.spawns
       .filter((s) => !used.has(s))
@@ -180,12 +179,10 @@ export class Game {
     this.phaseTime = C.PREP_SECONDS;
     this.decoys = [];
     this.splats = [];
-    this.scans = [];
     this.lastWinner = null;
 
     const all = [...this.players.values()];
     const seekerCount = Math.max(1, Math.ceil(all.length / C.SEEKER_RATIO));
-    // Wer selten Jaeger war, kommt zuerst dran; Gleichstand entscheidet der Zufall.
     const order = all
       .map((p) => ({ p, r: this.rng() }))
       .sort((a, b) => a.p.seekerRounds - b.p.seekerRounds || a.r - b.r)
@@ -199,13 +196,13 @@ export class Game {
         p.seekerRounds++;
         p.x = this.seekerSpawn.x + (this.rng() - 0.5) * 40;
         p.y = this.seekerSpawn.y + (this.rng() - 0.5) * 40;
-        // Falls der Zufall in eine Wand traf: zurueck auf den Punkt.
         if (isSolidAt(this.map, p.x, p.y)) { p.x = this.seekerSpawn.x; p.y = this.seekerSpawn.y; }
       } else {
         p.role = C.ROLE_HIDER;
         const s = this.hiderSpawn(used);
         p.x = s.x; p.y = s.y;
       }
+      this.pushEvent({ k: 'paint', id: p.id, paint: null });   // alle wieder weiss
     });
     this.hidersTotal = this.hiders.length;
     this.pushEvent({ k: 'phase', phase: this.phase, round: this.round });
@@ -215,35 +212,32 @@ export class Game {
   resetForRound(p) {
     p.alive = true;
     p.vx = 0; p.vy = 0;
-    p.color = C.PALETTE[7].slice();
-    p.stillTime = 0; p.shimmer = 0; p.lastMoveT = 99;
+    p.pose = 0; p.painting = false;
+    p.paint = null; p.avgColor = [245, 245, 245];
+    p.stillTime = 0;
     p.stamina = C.STAMINA_MAX; p.staminaDelay = 0;
-    p.absorbing = 0; p.grapple = null;
-    p.grappleCd = 0; p.decoyCd = 0; p.scanCd = 0; p.dashCd = 0; p.catchCd = 0;
-    p.dashT = 0; p.stunT = 0; p.markT = 0; p.respawnT = 0; p.splatT = 0;
+    p.decoyCd = 0; p.dashCd = 0; p.shotCd = 0;
+    p.dashT = 0; p.stunT = 0; p.respawnT = 0; p.splatT = 0;
     p.roundScore = 0; p.survivePts = 0; p.catches = 0;
-    p.actions = { primary: false, decoy: false, grapple: false, scan: false, dash: false };
+    p.actions = { primary: false, decoy: false, dash: false, pose: false };
   }
 
   becomeSeeker(p, immediate = false) {
     p.role = C.ROLE_SEEKER;
     p.alive = true;
-    p.grapple = null;
-    p.absorbing = 0;
-    p.markT = 0;
-    p.scanCd = immediate ? 2 : 0;
+    p.pose = 0; p.painting = false;
+    p.paint = null;
     p.dashCd = 0;
-    p.catchCd = 0.5;
+    p.shotCd = immediate ? 1.0 : 0.5;
     p.x = this.seekerSpawn.x;
     p.y = this.seekerSpawn.y;
     p.vx = 0; p.vy = 0;
   }
 
-  /** Ohne Jaeger keine Jagd: notfalls wird ein Chamaeleon umgedreht. */
   ensureSeekerExists() {
     if (this.seekers.length > 0) return;
     const pool = this.aliveHiders;
-    if (pool.length <= 1) return;   // dann endet die Runde ohnehin
+    if (pool.length <= 1) return;
     const p = pool[(this.rng() * pool.length) | 0];
     this.becomeSeeker(p, true);
     this.pushEvent({ k: 'converted', id: p.id, name: p.name });
@@ -260,7 +254,7 @@ export class Game {
     }
     for (const p of this.players.values()) {
       p.score += Math.round(p.roundScore);
-      p.grapple = null; p.dashT = 0; p.stunT = 0;
+      p.dashT = 0; p.stunT = 0;
     }
     this.pushEvent({
       k: 'roundend', winner, round: this.round,
@@ -280,13 +274,14 @@ export class Game {
   toLobby() {
     this.phase = C.PHASE_LOBBY;
     this.phaseTime = 0;
-    this.decoys = []; this.splats = []; this.scans = [];
+    this.decoys = []; this.splats = [];
     for (const p of this.players.values()) {
       this.resetForRound(p);
       p.role = C.ROLE_HIDER;
       p.ready = false;
       const s = this.randomSpawn();
       p.x = s.x; p.y = s.y;
+      this.pushEvent({ k: 'paint', id: p.id, paint: null });
     }
     this.pushEvent({ k: 'phase', phase: this.phase });
   }
@@ -296,7 +291,6 @@ export class Game {
     this.tick++;
     this.time += dt;
 
-    // Phasenuhr
     if (this.phase === C.PHASE_PREP) {
       this.phaseTime -= dt;
       if (this.phaseTime <= 0) {
@@ -323,22 +317,15 @@ export class Game {
     for (const p of this.players.values()) this.updatePlayer(p, dt);
     this.updateDecoys(dt);
     this.updateSplats(dt);
-    this.updateScans(dt);
     this.checkRoundEnd();
   }
 
   updatePlayer(p, dt) {
-    // Abklingzeiten
-    p.grappleCd = Math.max(0, p.grappleCd - dt);
     p.decoyCd = Math.max(0, p.decoyCd - dt);
-    p.scanCd = Math.max(0, p.scanCd - dt);
     p.dashCd = Math.max(0, p.dashCd - dt);
-    p.catchCd = Math.max(0, p.catchCd - dt);
+    p.shotCd = Math.max(0, p.shotCd - dt);
     p.stunT = Math.max(0, p.stunT - dt);
-    p.markT = Math.max(0, p.markT - dt);
-    p.shimmer = Math.max(0, p.shimmer - dt);
 
-    // Gefangen: kurz warten, dann als Jaeger zurueck.
     if (!p.alive) {
       p.respawnT -= dt;
       p.vx = 0; p.vy = 0;
@@ -355,82 +342,53 @@ export class Game {
     const isHider = p.role === C.ROLE_HIDER;
     const isSeeker = p.role === C.ROLE_SEEKER;
 
-    // Jaeger stehen in der Vorbereitung still - die Augen sind verbunden.
-    const frozen = (isSeeker && inPrep) || p.stunT > 0 || this.phase === C.PHASE_OVER;
+    // Malmodus friert die Figur ein (nur Chamaeleons koennen malen).
+    p.painting = isHider && p.input.paint;
+    const frozen = (isSeeker && inPrep) || p.stunT > 0 || this.phase === C.PHASE_OVER || p.painting;
     const inp = frozen ? EMPTY_INPUT : p.input;
 
-    // --- Zungenhaken zieht ---------------------------------------------
-    if (p.grapple) {
-      const g = p.grapple;
-      g.t += dt;
-      const dx = g.ax - p.x, dy = g.ay - p.y;
-      const dist = Math.hypot(dx, dy);
-      const before = { x: p.x, y: p.y };
-      if (dist > 1) {
-        p.vx = (dx / dist) * C.GRAPPLE_PULL_SPEED;
-        p.vy = (dy / dist) * C.GRAPPLE_PULL_SPEED;
-        const m = slideMove(this.map, p.x, p.y, p.vx * dt, p.vy * dt);
-        p.x = m.x; p.y = m.y;
-      }
-      const moved = Math.hypot(p.x - before.x, p.y - before.y);
-      if (dist <= C.GRAPPLE_RELEASE_DIST || moved < 0.5 || g.t > C.GRAPPLE_MAX_TIME) {
-        p.grapple = null;
-        p.vx *= 0.35; p.vy *= 0.35;
-      }
-      p.stillTime = 0; p.lastMoveT = 0;
-      this.clearActions(p);
-      return;
-    }
-
-    // --- Dash (Jaeger) ---------------------------------------------------
+    // Dash (Jaeger)
     if (p.dashT > 0) {
       p.dashT -= dt;
       p.vx = Math.cos(p.dashDir) * C.DASH_SPEED;
       p.vy = Math.sin(p.dashDir) * C.DASH_SPEED;
       const m = slideMove(this.map, p.x, p.y, p.vx * dt, p.vy * dt);
       p.x = m.x; p.y = m.y;
-      p.lastMoveT = 0; p.stillTime = 0;
+      p.stillTime = 0;
       this.clearActions(p);
       return;
     }
 
-    // --- Ausdauer und Sprint ------------------------------------------
+    // Pose wechseln (nur Chamaeleons, nur im Stand)
+    if (isHider && p.actions.pose && !frozen) {
+      p.pose = (p.pose + 1) % C.POSES.length;
+      p.vx = 0; p.vy = 0;
+      this.pushEvent({ k: 'pose', id: p.id, pose: p.pose });
+    }
+    // Bewegungstaste loest jede Pose
+    const wantsMove = inp.up || inp.down || inp.left || inp.right;
+    if (isHider && p.pose !== 0 && wantsMove) {
+      p.pose = 0;
+      this.pushEvent({ k: 'pose', id: p.id, pose: 0 });
+    }
+
     let sprintAllowed = false;
     if (isHider && !frozen) {
-      const wantsSprint = inp.sprint && (inp.up || inp.down || inp.left || inp.right);
-      if (wantsSprint && (p.sprinting ? p.stamina > 0 : p.stamina >= C.STAMINA_SPRINT_MIN)) {
-        sprintAllowed = true;
-      }
+      const wantsSprint = inp.sprint && wantsMove;
+      if (wantsSprint && (p.sprinting ? p.stamina > 0 : p.stamina >= C.STAMINA_SPRINT_MIN)) sprintAllowed = true;
     }
 
-    // --- Farbaufnahme: stillhalten und E halten ------------------------
-    const speedNow = Math.hypot(p.vx, p.vy);
-    const wantsMove = inp.up || inp.down || inp.left || inp.right;
-    if (isHider && inp.absorb && !wantsMove && speedNow < C.ABSORB_MOVE_TOLERANCE && !isSolidAt(this.map, p.x, p.y)) {
-      p.absorbing += dt;
-      if (p.absorbing >= C.ABSORB_TIME) {
-        p.color = tileColorAt(this.map, p.x, p.y).slice();
-        p.shimmer = C.CAMO_SHIMMER_TIME;
-        p.absorbing = 0;
-        this.pushEvent({ k: 'absorb', id: p.id, x: p.x, y: p.y });
-      }
-    } else {
-      p.absorbing = 0;
-    }
-
-    // --- Bewegung ------------------------------------------------------
-    const sprinting = stepMovement(p, inp, dt, this.map, { sprintAllowed });
+    const sprinting = stepMovement(p, inp, dt, this.map, { sprintAllowed, yaw: p.yaw });
     p.sprinting = sprinting;
     const speed = Math.hypot(p.vx, p.vy);
 
     if (sprinting && speed > 1) {
       p.stamina = Math.max(0, p.stamina - C.STAMINA_DRAIN * dt);
       p.staminaDelay = C.STAMINA_REGEN_DELAY;
-      // Farbspur: Sprinten hinterlaesst Kleckse in der eigenen Farbe.
       p.splatT -= dt;
       if (p.splatT <= 0 && inHunt) {
         p.splatT = C.SPLAT_INTERVAL;
-        this.addSplat(p.x, p.y, p.color);
+        this.addSplat(p.x, p.y, p.avgColor);
       }
     } else {
       p.staminaDelay = Math.max(0, p.staminaDelay - dt);
@@ -438,32 +396,18 @@ export class Game {
       p.splatT = 0;
     }
 
-    // Stillstand-Zaehler fuer die Tarnung
-    if (speed < C.SCAN_MOTION_THRESHOLD) {
-      p.stillTime += dt;
-      p.lastMoveT += dt;
-    } else {
-      p.stillTime = 0;
-      p.lastMoveT = 0;
-    }
+    if (speed < 5) p.stillTime += dt; else p.stillTime = 0;
 
-    // Ueberlebenspunkte
     if (isHider && inHunt) {
       p.survivePts += C.PTS_SURVIVE_PER_SEC * dt;
       if (p.survivePts >= 1) { const w = Math.floor(p.survivePts); p.roundScore += w; p.survivePts -= w; }
     }
 
-    // --- Aktionen ------------------------------------------------------
-    // In der Lobby duerfen Chamaeleons Haken und Koeder ueben; Jaeger gibt es dort nicht.
     const canAct = !frozen && (!inLobby || isHider);
     if (canAct) {
-      if (isHider) {
-        if (p.actions.grapple && p.grappleCd <= 0 && p.absorbing <= 0) this.tryGrapple(p);
-        if (p.actions.decoy && p.decoyCd <= 0 && (inHunt || inPrep)) this.tryDecoy(p);
-      }
+      if (isHider && p.actions.decoy && p.decoyCd <= 0 && (inHunt || inPrep)) this.tryDecoy(p);
       if (isSeeker && inHunt) {
-        if (p.actions.primary && p.catchCd <= 0) this.tryCatch(p);
-        if (p.actions.scan && p.scanCd <= 0) this.tryScan(p);
+        if (p.actions.primary && p.shotCd <= 0) this.tryShoot(p);
         if (p.actions.dash && p.dashCd <= 0) this.tryDash(p, inp);
       }
     }
@@ -475,96 +419,84 @@ export class Game {
   }
 
   // ---------------------------------------------------------------- Aktionen
-  tryGrapple(p) {
-    // Anker in Zielrichtung suchen: nah am Zielwinkel, in Reichweite, freie Bahn.
-    let best = null, bestScore = Infinity;
-    for (const a of this.map.anchors) {
-      const dx = a.x - p.x, dy = a.y - p.y;
-      const dist = Math.hypot(dx, dy);
-      if (dist > C.GRAPPLE_RANGE || dist < C.TILE) continue;
-      const ang = Math.atan2(dy, dx);
-      const off = Math.abs(angleDiff(p.aim, ang));
-      if (off > 0.32) continue;
-      const score = off * 200 + dist * 0.15;
-      if (score >= bestScore) continue;
-      // Bahn bis kurz vor die Saeule muss frei sein.
-      const tx = a.x - (dx / dist) * (C.TILE * 0.72);
-      const ty = a.y - (dy / dist) * (C.TILE * 0.72);
-      if (raycastSolid(this.map, p.x, p.y, tx, ty)) continue;
-      best = a; bestScore = score;
-    }
-    if (!best) { this.pushEvent({ k: 'grapplemiss', id: p.id }); return; }
-    p.grapple = { ax: best.x, ay: best.y, t: 0 };
-    p.grappleCd = C.GRAPPLE_COOLDOWN;
-    p.absorbing = 0;
-    this.pushEvent({ k: 'grapple', id: p.id, x: p.x, y: p.y, ax: best.x, ay: best.y });
-  }
-
   tryDecoy(p) {
     const own = this.decoys.filter((d) => d.owner === p.id).length;
     if (own >= C.DECOY_MAX_PER_PLAYER) return;
     if (isSolidAt(this.map, p.x, p.y)) return;
+    const id = 'd' + (nextEntityId++);
     this.decoys.push({
-      id: 'd' + (nextEntityId++), x: p.x, y: p.y, color: p.color.slice(),
+      id, x: p.x, y: p.y, yaw: p.yaw, pose: p.pose, paint: p.paint, avgColor: p.avgColor.slice(),
       owner: p.id, t: C.DECOY_LIFETIME,
     });
     p.decoyCd = C.DECOY_COOLDOWN;
     this.pushEvent({ k: 'decoy', id: p.id });
+    this.pushEvent({ k: 'paint', id, paint: p.paint });
   }
 
-  /** Zungenschlag des Jaegers: naechstes Ziel im Kegel vor ihm. */
-  tryCatch(p) {
-    p.catchCd = C.CATCH_COOLDOWN;
-    let target = null, targetDist = Infinity, isDecoy = false;
-    const consider = (x, y, obj, decoy) => {
-      const dx = x - p.x, dy = y - p.y;
-      const dist = Math.hypot(dx, dy);
-      if (dist > C.CATCH_RANGE + C.PLAYER_RADIUS) return;
-      if (dist > 4 && Math.abs(angleDiff(p.aim, Math.atan2(dy, dx))) > C.CATCH_ARC / 2) return;
-      if (dist >= targetDist) return;
-      if (raycastSolid(this.map, p.x, p.y, x, y, 5)) return;
-      target = obj; targetDist = dist; isDecoy = decoy;
-    };
+  /** Hoehe einer Figur in ihrer aktuellen Pose. */
+  static bodyHeight(pose) { return C.POSES[pose]?.h ?? C.BODY_H; }
+
+  /**
+   * Farbmarkierer: Strahl aus Augenhoehe entlang der Blickrichtung.
+   * Trifft er ein lebendes Chamaeleon oder einen Koeder vor der ersten Mauer,
+   * ist das ein Treffer.
+   */
+  tryShoot(p) {
+    p.shotCd = C.SHOT_COOLDOWN;
+    // Leichte Streuung, damit Dauerfeuer aus der Ferne nicht trivial ist.
+    const yaw = p.yaw + (this.rng() - 0.5) * C.SHOT_SPREAD * 2;
+    const pitch = p.pitch + (this.rng() - 0.5) * C.SHOT_SPREAD * 2;
+    const o = { x: p.x / TILE_PX, y: p.y / TILE_PX, h: C.EYE_H };
+    const d = dirFromAngles(yaw, pitch);
+    const wall = raycast3D(this.map, o, d, C.SHOT_RANGE);
+    const maxT = wall ? wall.dist : C.SHOT_RANGE;
+
+    let best = null, bestT = maxT, bestDecoy = false;
     for (const h of this.players.values()) {
       if (h.role !== C.ROLE_HIDER || !h.alive) continue;
-      consider(h.x, h.y, h, false);
+      const t = rayHitsCylinder(o, d, h.x / TILE_PX, h.y / TILE_PX, C.BODY_R, Game.bodyHeight(h.pose));
+      if (t !== null && t < bestT) { best = h; bestT = t; bestDecoy = false; }
     }
-    for (const d of this.decoys) consider(d.x, d.y, d, true);
+    for (const dc of this.decoys) {
+      const t = rayHitsCylinder(o, d, dc.x / TILE_PX, dc.y / TILE_PX, C.BODY_R, Game.bodyHeight(dc.pose));
+      if (t !== null && t < bestT) { best = dc; bestT = t; bestDecoy = true; }
+    }
 
-    this.pushEvent({ k: 'lash', id: p.id, x: p.x, y: p.y, aim: p.aim, hit: !!target });
-    if (!target) return;
+    const end = { x: o.x + d.x * bestT, y: o.y + d.y * bestT, h: o.h + d.h * bestT };
+    this.pushEvent({
+      k: 'shot', id: p.id, x: p.x, y: p.y,
+      from: { x: o.x, y: o.y, h: o.h }, to: end, hit: !!best,
+      wall: !best && wall ? { nx: wall.nx, ny: wall.ny, nh: wall.nh } : null,
+    });
+    if (!best) return;
 
-    if (isDecoy) {
-      this.decoys = this.decoys.filter((d) => d !== target);
+    if (bestDecoy) {
+      this.decoys = this.decoys.filter((dc) => dc !== best);
       p.stunT = C.DECOY_STUN;
-      const owner = this.players.get(target.owner);
+      const owner = this.players.get(best.owner);
       if (owner) owner.roundScore += C.PTS_DECOY_HIT;
-      this.pushEvent({ k: 'decoypop', x: target.x, y: target.y, by: p.id, owner: target.owner });
+      this.pushEvent({ k: 'decoypop', x: best.x, y: best.y, by: p.id, owner: best.owner });
       return;
     }
-    target.alive = false;
-    target.respawnT = C.RESPAWN_SECONDS;
-    target.grapple = null;
-    target.absorbing = 0;
-    target.vx = 0; target.vy = 0;
+    best.alive = false;
+    best.respawnT = C.RESPAWN_SECONDS;
+    best.vx = 0; best.vy = 0;
+    best.painting = false;
     p.roundScore += C.PTS_CATCH;
     p.catches++;
     this.pushEvent({
-      k: 'catch', by: p.id, byName: p.name, who: target.id, whoName: target.name,
-      x: target.x, y: target.y, left: this.aliveHiders.length,
+      k: 'catch', by: p.id, byName: p.name, who: best.id, whoName: best.name,
+      x: best.x, y: best.y, left: this.aliveHiders.length,
     });
   }
 
-  tryScan(p) {
-    p.scanCd = C.SCAN_COOLDOWN;
-    this.scans.push({ id: 's' + (nextEntityId++), x: p.x, y: p.y, r: 0, t: 0, hit: new Set() });
-    this.pushEvent({ k: 'scan', id: p.id, x: p.x, y: p.y });
-  }
-
   tryDash(p, inp) {
-    let ix = (inp.right ? 1 : 0) - (inp.left ? 1 : 0);
-    let iy = (inp.down ? 1 : 0) - (inp.up ? 1 : 0);
-    p.dashDir = (ix || iy) ? Math.atan2(iy, ix) : p.aim;
+    const fx = (inp.up ? 1 : 0) - (inp.down ? 1 : 0);
+    const sx = (inp.right ? 1 : 0) - (inp.left ? 1 : 0);
+    if (fx || sx) {
+      const c = Math.cos(p.yaw), s = Math.sin(p.yaw);
+      p.dashDir = Math.atan2(fx * s + sx * c, fx * c - sx * s);
+    } else p.dashDir = p.yaw;
     p.dashT = C.DASH_TIME;
     p.dashCd = C.DASH_COOLDOWN;
     this.pushEvent({ k: 'dash', id: p.id, x: p.x, y: p.y });
@@ -588,27 +520,8 @@ export class Game {
     this.splats = this.splats.filter((s) => s.t > 0);
   }
 
-  /** Die Scan-Welle breitet sich aus und markiert alles, was sich juengst bewegt hat. */
-  updateScans(dt) {
-    for (const s of this.scans) {
-      s.t += dt;
-      s.r = Math.min(C.SCAN_RADIUS, s.t * C.SCAN_SPEED);
-      for (const h of this.players.values()) {
-        if (h.role !== C.ROLE_HIDER || !h.alive || s.hit.has(h.id)) continue;
-        const d = Math.hypot(h.x - s.x, h.y - s.y);
-        if (d > s.r) continue;
-        s.hit.add(h.id);
-        if (h.lastMoveT < C.SCAN_MOTION_WINDOW) {
-          h.markT = C.SCAN_MARK_TIME;
-          this.pushEvent({ k: 'scanhit', id: h.id, x: h.x, y: h.y });
-        }
-      }
-    }
-    this.scans = this.scans.filter((s) => s.r < C.SCAN_RADIUS);
-  }
-
   // ---------------------------------------------------------------- Ausgabe
-  /** Was ein bestimmter Spieler in diesem Takt sehen darf. */
+  /** Was ein bestimmter Spieler in diesem Takt sieht. */
   snapshotFor(id) {
     const me = this.players.get(id);
     if (!me) return null;
@@ -619,41 +532,21 @@ export class Game {
       if (p.id === id) continue;
       const dist = Math.hypot(p.x - me.x, p.y - me.y);
       if (dist > C.VIEW_RADIUS) continue;
-      let alpha = 1;
-      let name = p.name;
-      if (p.role === C.ROLE_HIDER) {
-        if (!p.alive) continue;               // Gefangene verschwinden kurz
-        if (seesLikeSeeker) {
-          const base = baseVisibility(this.map, p);
-          alpha = visibilityForSeeker(base, dist, p.markT);
-          if (alpha < C.SEND_ALPHA_MIN) continue;
-          name = null;                        // Jaeger sehen keine Namen von Chamaeleons
-          alpha = Math.round(alpha * 100) / 100;
-        }
-      }
-      list.push(this.publicView(p, alpha, name));
+      if (p.role === C.ROLE_HIDER && !p.alive) continue;
+      // Jaeger sehen keine Namen von Chamaeleons - sie muessen hinschauen.
+      const name = p.role === C.ROLE_HIDER && seesLikeSeeker ? null : p.name;
+      list.push(this.publicView(p, name));
     }
 
-    // Koeder: fuer Jaeger als scheinbar stilles Chamaeleon getarnt, ohne Namen.
     for (const d of this.decoys) {
       const dist = Math.hypot(d.x - me.x, d.y - me.y);
       if (dist > C.VIEW_RADIUS) continue;
-      if (seesLikeSeeker) {
-        const fake = { x: d.x, y: d.y, color: d.color, stillTime: 99, shimmer: 0 };
-        const alpha = visibilityForSeeker(baseVisibility(this.map, fake), dist, 0);
-        if (alpha < C.SEND_ALPHA_MIN) continue;
-        list.push({
-          id: d.id, name: null, x: r1(d.x), y: r1(d.y), aim: 0, role: C.ROLE_HIDER,
-          color: d.color, alpha: Math.round(alpha * 100) / 100,
-          stun: 0, grapple: null, absorbing: false, sprint: false, mark: false, decoy: false, still: true,
-        });
-      } else {
-        list.push({
-          id: d.id, name: 'Köder', x: r1(d.x), y: r1(d.y), aim: 0, role: C.ROLE_HIDER,
-          color: d.color, alpha: 1, stun: 0, grapple: null, absorbing: false, sprint: false,
-          mark: false, decoy: true, still: true, owner: d.owner, life: Math.round(d.t),
-        });
-      }
+      list.push({
+        id: d.id, name: seesLikeSeeker ? null : 'Köder', x: r1(d.x), y: r1(d.y), yaw: r2(d.yaw),
+        role: C.ROLE_HIDER, alive: true, pose: d.pose, stun: 0, sprint: false, dash: false,
+        painting: false, decoy: !seesLikeSeeker, still: true,
+        owner: seesLikeSeeker ? undefined : d.owner, life: seesLikeSeeker ? undefined : Math.round(d.t),
+      });
     }
 
     const events = this.events.filter((ev) => this.eventVisibleTo(ev, me));
@@ -670,16 +563,11 @@ export class Game {
       seekers: this.seekers.length,
       winner: this.lastWinner,
       you: {
-        id: me.id, x: r1(me.x), y: r1(me.y), vx: r1(me.vx), vy: r1(me.vy), aim: me.aim,
-        role: me.role, alive: me.alive, color: me.color,
-        stamina: Math.round(me.stamina), absorb: Math.round((me.absorbing / C.ABSORB_TIME) * 100) / 100,
-        cd: {
-          grapple: r1(me.grappleCd), decoy: r1(me.decoyCd), scan: r1(me.scanCd),
-          dash: r1(me.dashCd), catch: r1(me.catchCd),
-        },
-        stun: r1(me.stunT), mark: r1(me.markT), respawn: r1(me.respawnT), dash: me.dashT > 0,
-        vis: me.role === C.ROLE_HIDER ? Math.round(baseVisibility(this.map, me) * 100) / 100 : 1,
-        grapple: me.grapple ? { ax: me.grapple.ax, ay: me.grapple.ay } : null,
+        id: me.id, x: r1(me.x), y: r1(me.y), vx: r1(me.vx), vy: r1(me.vy),
+        role: me.role, alive: me.alive, pose: me.pose, painting: me.painting,
+        stamina: Math.round(me.stamina),
+        cd: { decoy: r1(me.decoyCd), dash: r1(me.dashCd), shot: r1(me.shotCd) },
+        stun: r1(me.stunT), respawn: r1(me.respawnT), dash: me.dashT > 0,
         score: me.score, roundScore: Math.round(me.roundScore), catches: me.catches,
         sprint: me.sprinting, ready: me.ready,
       },
@@ -687,33 +575,34 @@ export class Game {
       splats: this.splats
         .filter((s) => Math.hypot(s.x - me.x, s.y - me.y) < C.VIEW_RADIUS)
         .map((s) => ({ x: r1(s.x), y: r1(s.y), c: s.color, t: r1(s.t), s: s.seed })),
-      scans: this.scans.map((s) => ({ id: s.id, x: r1(s.x), y: r1(s.y), r: r1(s.r) })),
       events,
     };
   }
 
-  publicView(p, alpha, name) {
+  publicView(p, name) {
     return {
-      id: p.id, name, x: r1(p.x), y: r1(p.y), aim: Math.round(p.aim * 100) / 100,
-      role: p.role, alive: p.alive, color: p.color, alpha,
-      stun: r1(p.stunT), grapple: p.grapple ? { ax: p.grapple.ax, ay: p.grapple.ay } : null,
-      absorbing: p.absorbing > 0, sprint: p.sprinting, mark: p.markT > 0,
-      dash: p.dashT > 0, decoy: false, still: p.stillTime > C.CAMO_STILL_RAMP,
+      id: p.id, name, x: r1(p.x), y: r1(p.y), yaw: r2(p.yaw), pitch: r2(p.pitch),
+      role: p.role, alive: p.alive, pose: p.pose,
+      stun: r1(p.stunT), sprint: p.sprinting, dash: p.dashT > 0, painting: p.painting,
+      decoy: false, still: p.stillTime > 0.8,
     };
   }
 
-  /** Ereignisse mit Positionsangaben werden fuer Jaeger nur in Sichtweite geliefert. */
+  /** Ereignisse mit Position: Jaeger bekommen sie nur in Sichtweite. */
   eventVisibleTo(ev, me) {
     if (ev.x === undefined) return true;
     if (me.role !== C.ROLE_SEEKER && me.alive) return true;
-    if (ev.k === 'absorb' && ev.id !== me.id) {
-      // Das Flimmern sieht ein Jaeger nur aus der Naehe.
-      return Math.hypot(ev.x - me.x, ev.y - me.y) < C.REVEAL_RADIUS * 3;
-    }
     return Math.hypot(ev.x - me.x, ev.y - me.y) < C.VIEW_RADIUS;
   }
 
-  /** Tabelle fuer Lobby und Anzeigetafel - fuer alle gleich. */
+  /** Alle aktuellen Bemalungen - fuer Neuankoemmlinge. */
+  paintSnapshot() {
+    const out = [];
+    for (const p of this.players.values()) if (p.paint) out.push({ id: p.id, paint: p.paint });
+    for (const d of this.decoys) if (d.paint) out.push({ id: d.id, paint: d.paint });
+    return out;
+  }
+
   scoreboard() {
     return [...this.players.values()]
       .sort((a, b) => b.score - a.score || a.name.localeCompare(b.name))
@@ -727,3 +616,4 @@ export class Game {
 }
 
 const r1 = (v) => Math.round(v * 10) / 10;
+const r2 = (v) => Math.round(v * 100) / 100;

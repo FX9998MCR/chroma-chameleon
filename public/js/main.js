@@ -1,4 +1,4 @@
-// Einstiegspunkt: Menue, Lobby, Spielschleife, Vorhersage, Ereignisse.
+// Einstiegspunkt: Menue, Lobby, Spielschleife, Vorhersage, Malmodus, Ereignisse.
 
 import * as C from '/shared/constants.js';
 import { stepMovement } from '/shared/physics.js';
@@ -8,6 +8,7 @@ import { Input } from './input.js';
 import { Audio } from './audio.js';
 import { Renderer } from './render.js';
 import { Hud } from './hud.js';
+import { Painter } from './paint.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -26,15 +27,12 @@ const input = new Input(renderer.renderer.domElement);
 const audio = new Audio();
 const hud = new Hud();
 let net = null;
+let painter = null;
 
 const S = {
   meId: null, name: '', room: null, hostId: null, map: null,
-  state: null,            // letzter Server-Snapshot
-  stateAt: 0,
-  you: null,
-  pred: null,             // vorhergesagte eigene Position
-  seq: 0,
-  lastSend: 0,
+  state: null, stateAt: 0, you: null,
+  pred: null, seq: 0,
   ready: false,
   phase: C.PHASE_LOBBY,
   inGame: false,
@@ -113,7 +111,7 @@ function renderLobby(msg) {
   }
   const n = msg.players.length;
   ui.lobbyHint.textContent = n < msg.min
-    ? `Mindestens ${msg.min} Spieler nötig – lade jemanden ein (${n}/${msg.max}).`
+    ? `Mindestens ${msg.min} Spieler nötig – lade jemanden ein oder füge Bots hinzu (${n}/${msg.max}).`
     : `Startet, wenn alle bereit sind – oder der Host startet. ${n}/${msg.max} Spieler.`;
   ui.btnStart.hidden = !(msg.hostId === S.meId && msg.canStart);
   ui.botrow.hidden = msg.hostId !== S.meId;
@@ -121,12 +119,20 @@ function renderLobby(msg) {
   ui.btnRemoveBot.disabled = !msg.players.some((p) => p.bot);
   const inLobbyPhase = msg.phase === C.PHASE_LOBBY;
   ui.lobby.hidden = !inLobbyPhase;
+  input.wantLock = !inLobbyPhase;
+  if (inLobbyPhase) input.releaseLock();
   if (!inLobbyPhase) { S.ready = false; ui.btnReady.textContent = 'Bereit'; ui.btnReady.classList.remove('on'); }
 }
 
 // ---------------------------------------------------------------- Netz
 function connect(join) {
   net = new Net();
+  painter = new Painter(renderer, input, net);
+  input.onTogglePaint = () => {
+    if (!S.you || S.you.role !== C.ROLE_HIDER || !S.you.alive || S.phase === C.PHASE_OVER || S.phase === C.PHASE_LOBBY) return;
+    painter.toggle();
+    if (painter.active) hud.showCenter('<span class="big">Malmodus</span>Leertaste: Farbe aufnehmen · Linke Maustaste: malen · Rechte Maustaste: drehen · F: fertig', 4000);
+  };
   net.on('welcome', (w) => {
     S.meId = w.id; S.name = w.name; S.room = w.room; S.hostId = w.hostId;
     hud.meId = w.id;
@@ -142,10 +148,13 @@ function connect(join) {
   net.on('lobby', renderLobby);
   net.on('chat', (m) => hud.chat(m.from, m.text));
   net.on('kick', (m) => { ui.discReason.textContent = m.reason; });
+  net.on('paint', (m) => renderer.applyPaint(m.id, m.paint, S.meId));
+  net.on('paintall', (m) => { for (const it of m.items) renderer.applyPaint(it.id, it.paint, S.meId); });
   net.on('state', onState);
   net.on('close', (ev) => {
     if (!S.inGame) { if (!ui.menuError.textContent) showError('Keine Verbindung zum Server.'); setButtons(true); return; }
     S.inGame = false;
+    input.releaseLock();
     ui.discReason.textContent ||= ev.reason || 'Der Server ist nicht mehr erreichbar.';
     ui.disconnected.hidden = false;
   });
@@ -157,7 +166,6 @@ function onState(st) {
   S.state = st; S.stateAt = now; S.you = st.you;
   const you = st.you;
 
-  // Vorhersage mit Serverposition abgleichen
   if (!S.pred) S.pred = { x: you.x, y: you.y, vx: you.vx, vy: you.vy, role: you.role };
   S.pred.role = you.role;
   const ex = you.x - S.pred.x, ey = you.y - S.pred.y;
@@ -167,24 +175,28 @@ function onState(st) {
 
   renderer.pushSnapshot(st, now);
 
-  // Phasenwechsel
   if (st.phase !== S.lastPhaseSeen) {
     S.lastPhaseSeen = st.phase;
     S.phase = st.phase;
     if (st.phase === C.PHASE_PREP) {
       renderer.clearAll();
+      painter?.reset();
       hud.el.roundend.hidden = true;
-      hud.showCenter(`<span class="big">Runde ${st.round}</span>${you.role === C.ROLE_SEEKER ? 'Du bist Jäger – gleich geht es los.' : 'Du bist Chamäleon – versteck dich!'}`, 3500);
+      hud.showCenter(`<span class="big">Runde ${st.round}</span>${you.role === C.ROLE_SEEKER ? 'Du bist Sucher – gleich geht es los.' : 'Du bist Chamäleon – such ein Versteck und mal dich an (F)!'}`, 4000);
       audio.roundStart();
     } else if (st.phase === C.PHASE_HUNT) {
-      hud.showCenter(`<span class="big">Die Jagd beginnt!</span>${you.role === C.ROLE_SEEKER ? 'Finde sie alle.' : 'Halte still. Halte durch.'}`, 3000);
+      hud.showCenter(`<span class="big">Die Suche beginnt!</span>${you.role === C.ROLE_SEEKER ? 'Schau genau hin. Linke Maustaste markiert.' : 'Nicht bewegen. Nicht auffallen.'}`, 3000);
       audio.huntStart();
     } else if (st.phase === C.PHASE_LOBBY) {
       renderer.clearAll();
+      painter?.reset();
       hud.el.roundend.hidden = true;
+    } else if (st.phase === C.PHASE_OVER) {
+      if (painter?.active) painter.setActive(false);
     }
   }
-  // Countdown-Ticks
+  if (painter?.active && (!you.alive || you.role !== C.ROLE_HIDER)) painter.setActive(false);
+
   const tl = Math.ceil(st.timeLeft);
   if ((st.phase === C.PHASE_PREP && tl <= 3 && tl >= 1) || (st.phase === C.PHASE_HUNT && tl <= 5 && tl >= 1)) {
     if (S.lastTickSound !== tl) { S.lastTickSound = tl; audio.tick(); }
@@ -193,45 +205,32 @@ function onState(st) {
   for (const ev of st.events) handleEvent(ev, st);
 }
 
-function handleEvent(ev, st) {
+function handleEvent(ev) {
   const me = S.meId;
   const near = (x, y) => S.pred && Math.hypot(x - S.pred.x, y - S.pred.y) < 700;
   switch (ev.k) {
+    case 'shot':
+      renderer.shot(ev);
+      if (ev.id === me || near(ev.x, ev.y)) { ev.hit ? audio.catchHit() : audio.lashMiss(); }
+      break;
     case 'catch':
-      renderer.burst(ev.x, ev.y, 0xff8c42, 22, 4);
-      if (ev.who === me) { audio.caught(); hud.showCenter('<span class="big">Erwischt!</span>', 2500); }
-      else if (near(ev.x, ev.y)) audio.catchHit();
-      hud.feed(`${ev.byName} hat ${ev.whoName} erwischt · ${ev.left} übrig`, 'catch');
+      if (ev.who === me) { audio.caught(); hud.showCenter('<span class="big">Gefunden!</span>', 2500); }
+      hud.feed(`${ev.byName} hat ${ev.whoName} gefunden · ${ev.left} übrig`, 'catch');
       break;
-    case 'lash':
-      renderer.lash(ev.x, ev.y, ev.aim, ev.hit);
-      if (!ev.hit && (ev.id === me || near(ev.x, ev.y))) audio.lashMiss();
+    case 'paint':
+      renderer.applyPaint(ev.id, ev.paint, me);
       break;
-    case 'scan':
-      if (ev.id === me || near(ev.x, ev.y)) audio.scan();
-      break;
-    case 'scanhit':
-      if (ev.id === me) { hud.feed('Der Scan hat dich erfasst! Beweg dich oder bleib ganz still.', 'catch'); audio.scanHit(); }
-      else if (S.you?.role === C.ROLE_SEEKER) audio.scanHit();
-      break;
-    case 'grapple':
-      if (ev.id === me || near(ev.x, ev.y)) audio.grapple();
-      break;
-    case 'grapplemiss':
-      if (ev.id === me) { audio.grappleMiss(); hud.feed('Kein Anker in Zielrichtung (Säulen mit gelbem Ring).'); }
-      break;
-    case 'absorb':
-      if (ev.id === me) { audio.absorb(); hud.feed('Farbe aufgenommen – kurz sichtbar!', 'good'); }
-      renderer.burst(ev.x, ev.y, S.you?.color ?? [255, 255, 255], 8, 1.5);
+    case 'pose':
+      if (ev.id === me) { hud.showCenter(`<span class="big">${C.POSES[ev.pose]?.name ?? ''}</span>`, 1200); }
       break;
     case 'decoy':
-      if (ev.id === me) { audio.decoy(); hud.feed('Köder abgesetzt.', 'good'); }
+      if (ev.id === me) { audio.decoy(); hud.feed('Köder abgesetzt – eine Kopie von dir.', 'good'); }
       break;
     case 'decoypop':
       renderer.burst(ev.x, ev.y, 0xf0b429, 20, 4);
       if (near(ev.x, ev.y)) audio.decoyPop();
-      if (ev.owner === me) hud.feed('Dein Köder hat einen Jäger betäubt! +' + C.PTS_DECOY_HIT, 'good');
-      if (ev.by === me) hud.feed('Das war ein Köder – du bist kurz betäubt.', 'catch');
+      if (ev.owner === me) hud.feed('Dein Köder hat einen Sucher reingelegt! +' + C.PTS_DECOY_HIT, 'good');
+      if (ev.by === me) hud.feed('Das war ein Köder – du bist kurz benommen.', 'catch');
       break;
     case 'decoyfade':
       renderer.burst(ev.x, ev.y, 0xf0b429, 6, 1.5);
@@ -245,10 +244,10 @@ function handleEvent(ev, st) {
       break;
     }
     case 'respawn':
-      if (ev.id === me) hud.feed('Du bist jetzt Jäger. Finde die anderen!', 'catch');
+      if (ev.id === me) hud.feed('Du bist jetzt Sucher. Finde die anderen!', 'catch');
       break;
     case 'converted':
-      hud.feed(`${ev.name} ist jetzt Jäger (Ersatz).`, 'catch');
+      hud.feed(`${ev.name} ist jetzt Sucher (Ersatz).`, 'catch');
       break;
     case 'join': hud.chat('', `${ev.name} ist beigetreten.`, true); break;
     case 'leave': hud.chat('', `${ev.name} hat den Raum verlassen.`, true); break;
@@ -256,10 +255,9 @@ function handleEvent(ev, st) {
   }
 }
 
-/** Darf der Client seine Bewegung selbst vorausberechnen? */
 function canPredict() {
   const y = S.you;
-  if (!y || !y.alive || y.grapple || y.stun > 0 || y.dash) return false;
+  if (!y || !y.alive || y.stun > 0 || y.dash || y.painting || painter?.active) return false;
   if (S.phase === C.PHASE_OVER) return false;
   if (y.role === C.ROLE_SEEKER && S.phase === C.PHASE_PREP) return false;
   return true;
@@ -275,47 +273,32 @@ input.onKey = (e, down) => {
       if (text) net?.send({ t: 'chat', text });
       ui.chatInput.value = '';
       ui.chatInput.blur();
+      if (input.wantLock && !painter?.active) input.requestLock();
     } else if (!ui.lobby.hidden) {
       return true;
     } else {
+      input.releaseLock();
       ui.chatInput.focus();
     }
     e.preventDefault();
     return false;
   }
-  if (down && e.code === 'Escape') { ui.chatInput.blur(); return false; }
+  if (down && e.code === 'Escape') { ui.chatInput.blur(); if (painter?.active) painter.setActive(false); return false; }
   return true;
 };
 
-// ---------------------------------------------------------------- Zielrichtung
-/** Zielwinkel und Kamera-Vorlauf aus der Mausposition. */
-function computeAim() {
-  let aim = S.pred?.aim ?? 0;
-  let lean = { x: 0, y: 0 };
-  if (!S.pred) return { aim, lean };
-  const w = renderer.screenToWorld(input.mouse.x, input.mouse.y);
-  if (w) {
-    const dx = w.x - S.pred.x, dy = w.y - S.pred.y;
-    if (Math.hypot(dx, dy) > 4) aim = Math.atan2(dy, dx);
-    const d = Math.min(1, Math.hypot(dx, dy) / 600);
-    lean = { x: dx * 0.22 * d, y: dy * 0.22 * d };
-  }
-  S.pred.aim = aim;
-  return { aim, lean };
-}
-
-// ---------------------------------------------------------------- Eingabeversand
-// Eigener Takt, unabhaengig vom Rendern: auch bei niedriger Bildrate kommen
-// Eingaben puenktlich beim Server an.
+// ---------------------------------------------------------------- Eingabeversand (30 Hz)
 function sendInput() {
   if (!S.inGame || !S.pred || !net) return;
-  const { aim } = computeAim();
   const a = input.takeActions();
-  const anyAction = Object.values(a).some(Boolean);
   const chatOpen = document.activeElement === ui.chatInput;
+  const painting = !!painter?.active;
+  const anyAction = !painting && Object.values(a).some(Boolean);
+  const none = { up: false, down: false, left: false, right: false, sprint: false, paint: painting };
   net.send({
-    t: 'input', seq: ++S.seq, aim,
-    k: chatOpen ? { up: false, down: false, left: false, right: false, sprint: false, absorb: false } : input.keys,
+    t: 'input', seq: ++S.seq,
+    look: { yaw: input.look.yaw, pitch: input.look.pitch },
+    k: chatOpen || painting ? none : input.keys,
     a: anyAction && !chatOpen ? a : undefined,
   });
 }
@@ -329,38 +312,34 @@ function frame(now) {
   last = now;
 
   if (S.inGame && S.pred && S.you && S.map) {
-    const { aim, lean } = computeAim();
-
-    // Vorhersage der eigenen Bewegung
     const y = S.you;
     if (canPredict()) {
       const sprintAllowed = y.role === C.ROLE_HIDER && input.keys.sprint && y.stamina > 0;
-      stepMovement(S.pred, input.keys, dt, S.map, { sprintAllowed });
+      stepMovement(S.pred, input.keys, dt, S.map, { sprintAllowed, yaw: input.look.yaw });
     } else {
-      // Server fuehrt: weich hinterher
       S.pred.x += (y.x - S.pred.x) * Math.min(1, dt * 12);
       S.pred.y += (y.y - S.pred.y) * Math.min(1, dt * 12);
       S.pred.vx = 0; S.pred.vy = 0;
     }
-
+    painter?.update(now);
+    const speed = Math.hypot(S.pred.vx, S.pred.vy);
+    // Die Figur schaut in Blickrichtung; in Posen behaelt sie ihre Ausrichtung.
     renderer.update({
-      dt, now, phase: S.phase, meId: S.meId,
+      dt, now, meId: S.meId, paintMode: !!painter?.active,
       me: {
-        x: S.pred.x, y: S.pred.y, aim, role: y.role, alive: y.alive, color: y.color, vis: y.vis,
-        grapple: y.grapple, absorb: y.absorb, stun: y.stun, mark: y.mark, sprint: y.sprint, dash: y.dash,
-        speed: Math.hypot(S.pred.vx, S.pred.vy), lean,
+        x: S.pred.x, y: S.pred.y, yaw: input.look.yaw, pitch: input.look.pitch, role: y.role, alive: y.alive,
+        pose: y.pose, stun: y.stun, speed, painting: y.painting,
       },
     });
-    hud.update(S.state, y, net?.rtt ?? 0);
+    hud.update(S.state, y, net?.rtt ?? 0, { painting: !!painter?.active, locked: input.locked });
   } else {
-    renderer.update({ dt, now, me: null, phase: S.phase, meId: null });
+    renderer.update({ dt, now, me: null, meId: null });
   }
 }
 requestAnimationFrame(frame);
 
-// Bei Fokusverlust Eingaben loeschen, damit niemand "weiterlaeuft".
 window.addEventListener('blur', () => input.reset());
 document.addEventListener('visibilitychange', () => { if (document.hidden) input.reset(); });
 
 // Fuer automatisierte Browsertests und Fehlersuche in der Konsole.
-window.__cc = { S, renderer, hud, input, get net() { return net; } };
+window.__cc = { S, renderer, hud, input, get net() { return net; }, get painter() { return painter; } };

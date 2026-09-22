@@ -1,71 +1,66 @@
-// Three.js-Szene: Kamera, Licht, Spielfiguren, Interpolation und Effekte.
+// Three.js-Szene: Third-Person-Kamera, Figuren, Bemalung, Schuesse, Effekte.
 
 import * as THREE from 'three';
 import * as C from '/shared/constants.js';
 import { deserializeMap } from '/shared/map.js';
-import { lerp, angleDiff } from '/shared/physics.js';
-import { makeChameleon, makeSeeker, makeTongue, aimTongue, rgb, GEO } from './models.js';
+import { lerp, angleDiff, raycast3D, dirFromAngles } from '/shared/physics.js';
+import { makeFigure, animateHumanoid, rgb, GEO } from './models.js';
 import { buildWorld, animateWorld } from './world.js';
 
-const U = 1 / C.TILE;    // Pixel -> Einheiten
-const UP = new THREE.Vector3(0, 1, 0);
+const U = 1 / C.TILE;
 
 export class Renderer {
   constructor(container, labelsEl) {
     this.container = container;
     this.labelsEl = labelsEl;
-    // Leistungsmodus: per URL (?lowfx) oder Einstellung - fuer schwache Rechner.
     this.lowFx = new URLSearchParams(location.search).has('lowfx') || localStorage.getItem('cc-lowfx') === '1';
     this.renderer = new THREE.WebGLRenderer({ antialias: !this.lowFx, powerPreference: 'high-performance' });
     this.renderer.setPixelRatio(this.lowFx ? 1 : Math.min(window.devicePixelRatio, 2));
     this.renderer.shadowMap.enabled = !this.lowFx;
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    this.renderer.toneMappingExposure = 1.05;
+    this.renderer.toneMappingExposure = 1.0;
     container.appendChild(this.renderer.domElement);
 
     this.scene = new THREE.Scene();
-    this.scene.background = new THREE.Color(0x0b0f14);
-    this.scene.fog = new THREE.Fog(0x0b0f14, 26, 44);
+    this.scene.background = new THREE.Color(0x9fc3e6);
+    this.scene.fog = new THREE.Fog(0x9fc3e6, 40, 75);
 
-    this.camera = new THREE.PerspectiveCamera(48, 1, 0.1, 120);
-    this.camTarget = new THREE.Vector3();
-    // Steil von oben, damit Mauern die eigene Figur moeglichst nie verdecken.
-    this.camOffset = new THREE.Vector3(0, 17.5, 6.5);
+    this.camera = new THREE.PerspectiveCamera(64, 1, 0.05, 150);
+    this.camPos = new THREE.Vector3();
+    this.camLook = new THREE.Vector3();
+    this.orbit = { yaw: 0, pitch: 0.2, dist: 2.6 };
+    this.paintMode = false;
 
-    this.scene.add(new THREE.HemisphereLight(0xcfe8ff, 0x22301f, 0.75));
-    this.sun = new THREE.DirectionalLight(0xfff1d6, 1.6);
+    // Licht so ausbalanciert, dass auch Wandseiten im Schatten ihre Farbe zeigen -
+    // man muss Farben ablesen koennen, sonst kann man sich nicht anmalen.
+    this.scene.add(new THREE.HemisphereLight(0xe6f0ff, 0x6a705a, 1.35));
+    this.scene.add(new THREE.AmbientLight(0xffffff, 0.25));
+    this.fill = new THREE.DirectionalLight(0xcfe0ff, 0.45);
+    this.scene.add(this.fill);
+    this.scene.add(this.fill.target);
+    this.sun = new THREE.DirectionalLight(0xfff3e0, 1.25);
     this.sun.castShadow = true;
     this.sun.shadow.mapSize.set(2048, 2048);
     const sc = this.sun.shadow.camera;
-    sc.left = -20; sc.right = 20; sc.top = 20; sc.bottom = -20; sc.near = 1; sc.far = 80;
-    this.sun.shadow.bias = -0.0008;
+    sc.left = -22; sc.right = 22; sc.top = 22; sc.bottom = -22; sc.near = 1; sc.far = 90;
+    this.sun.shadow.bias = -0.0006;
     this.scene.add(this.sun);
     this.scene.add(this.sun.target);
 
     this.map = null;
     this.world = null;
-    this.entities = new Map();    // id -> Entity
-    this.me = null;               // eigene Figur
+    this.entities = new Map();
+    this.me = null;
     this.meKind = null;
-    this.tongues = new Map();     // id -> Zunge (Haken)
-    this.lashes = [];             // kurze Zungenschlaege
-    this.rings = new Map();       // scan id -> Ring
+    this.tracers = [];
+    this.decals = [];
     this.splats = new Map();
     this.particles = [];
     this.particlePool = [];
     this.raycaster = new THREE.Raycaster();
-    this.groundPlane = new THREE.Plane(UP, 0);
     this.clock = 0;
-    this.lookLean = new THREE.Vector3();
-
-    this.absorbRing = new THREE.Mesh(
-      new THREE.RingGeometry(0.45, 0.62, 32),
-      new THREE.MeshBasicMaterial({ color: 0xf0b429, transparent: true, opacity: 0, side: THREE.DoubleSide, depthWrite: false }),
-    );
-    this.absorbRing.rotation.x = -Math.PI / 2;
-    this.absorbRing.position.y = 0.02;
-    this.scene.add(this.absorbRing);
+    this.pendingPaint = new Map();   // id -> paint, falls Figur noch nicht existiert
 
     this.resize();
     window.addEventListener('resize', () => this.resize());
@@ -75,7 +70,6 @@ export class Renderer {
     this.lowFx = on;
     this.renderer.setPixelRatio(on ? 1 : Math.min(window.devicePixelRatio, 2));
     this.renderer.shadowMap.enabled = !on;
-    // Materialien muessen neu kompiliert werden, damit der Schattenwechsel greift.
     this.scene.traverse((o) => { if (o.isMesh && o.material) o.material.needsUpdate = true; });
     this.resize();
   }
@@ -92,36 +86,41 @@ export class Renderer {
     if (this.world) this.scene.remove(this.world.group);
     this.map = deserializeMap(raw);
     this.world = buildWorld(this.scene, this.map);
-    this.camTarget.set(this.map.w / 2, 0, this.map.h / 2);
   }
 
-  /** Bildschirmpunkt -> Weltkoordinate in Pixeln (2D-Spielkoordinaten). */
-  screenToWorld(mx, my) {
-    const ndc = new THREE.Vector2((mx / window.innerWidth) * 2 - 1, -(my / window.innerHeight) * 2 + 1);
-    this.raycaster.setFromCamera(ndc, this.camera);
-    const hit = new THREE.Vector3();
-    if (!this.raycaster.ray.intersectPlane(this.groundPlane, hit)) return null;
-    return { x: hit.x * C.TILE, y: hit.z * C.TILE };
+  // ---------------------------------------------------------------- Picking
+  ndc(mx, my) {
+    return new THREE.Vector2((mx / window.innerWidth) * 2 - 1, -(my / window.innerHeight) * 2 + 1);
+  }
+
+  /** Erster Treffer in der Welt (Boden, Mauern, Buesche, Saeulen) unter dem Cursor. */
+  pickWorld(mx, my) {
+    if (!this.world) return null;
+    this.raycaster.setFromCamera(this.ndc(mx, my), this.camera);
+    const hits = this.raycaster.intersectObjects(this.world.pickables, false);
+    return hits[0] ?? null;
+  }
+
+  /** Treffer auf der eigenen Figur (fuer den Pinsel). */
+  pickSelf(mx, my) {
+    if (!this.me) return null;
+    this.raycaster.setFromCamera(this.ndc(mx, my), this.camera);
+    const meshes = Object.values(this.me.userData.parts);
+    const hits = this.raycaster.intersectObjects(meshes, false);
+    return hits[0] ?? null;
   }
 
   // ---------------------------------------------------------------- Figuren
-  makeModel(role, color) {
-    return role === C.ROLE_SEEKER ? makeSeeker() : makeChameleon(color);
-  }
-
-  ensureEntity(id, role, color, name) {
+  ensureEntity(id, role, name) {
     let e = this.entities.get(id);
     if (e && e.role !== role) { this.removeEntity(id); e = null; }
     if (!e) {
-      const group = this.makeModel(role, color);
+      const group = makeFigure(role === C.ROLE_SEEKER ? 'seeker' : 'hider');
       this.scene.add(group);
-      e = {
-        id, role, group, name, buf: [], alpha: 0, targetAlpha: 1, phase: Math.random() * 6,
-        color: color.slice(), lastSeen: 0, labelEl: null, x: 0, y: 0, aim: 0, cur: null,
-        mark: false, stun: 0, decoy: false, grapple: null, sprint: false, dash: false, absorbing: false,
-      };
+      e = { id, role, group, name, buf: [], lastSeen: 0, labelEl: null, cur: null, pose: 0, stun: 0, decoy: false, sprint: false, dash: false, painting: false, speedEst: 0 };
       this.entities.set(id, e);
-      this.setOpacity(group, 0);
+      const pending = this.pendingPaint.get(id);
+      if (pending !== undefined) { this.applyPaintTo(group, pending); this.pendingPaint.delete(id); }
     }
     return e;
   }
@@ -132,89 +131,74 @@ export class Renderer {
     this.scene.remove(e.group);
     this.disposeGroup(e.group);
     if (e.labelEl) e.labelEl.remove();
-    const t = this.tongues.get(id);
-    if (t) { this.scene.remove(t); this.tongues.delete(id); }
     this.entities.delete(id);
   }
 
   disposeGroup(g) {
+    const seen = new Set();
     g.traverse((o) => {
-      if (o.isMesh) {
-        if (Array.isArray(o.material)) o.material.forEach((m) => m.dispose());
-        else o.material?.dispose();
-      }
+      if (!o.isMesh) return;
+      const mats = Array.isArray(o.material) ? o.material : [o.material];
+      for (const m of mats) { if (m && !seen.has(m)) { seen.add(m); m.map?.dispose?.(); m.dispose(); } }
+      o.geometry?.dispose?.();
     });
   }
 
-  setColor(e, color) {
-    if (e.color[0] === color[0] && e.color[1] === color[1] && e.color[2] === color[2]) return;
-    e.color = color.slice();
-    const mats = e.group.userData.mats;
-    if (mats?.[0]) mats[0].color.copy(rgb(color));
-    if (mats?.[1]) mats[1].color.copy(rgb(color).offsetHSL(0, -0.05, 0.12));
+  ensureMe(role) {
+    if (this.me && this.meKind !== role) { this.scene.remove(this.me); this.disposeGroup(this.me); this.me = null; }
+    if (!this.me) {
+      this.me = makeFigure(role === C.ROLE_SEEKER ? 'seeker' : 'hider');
+      this.meKind = role;
+      this.scene.add(this.me);
+    }
   }
 
-  setOpacity(group, a) {
-    group.traverse((o) => {
-      if (!o.isMesh || o.userData.hud) return;
-      const m = o.material;
-      if (!m) return;
-      const isHud = o === group.userData.ring || o === group.userData.mark;
-      if (isHud) return;
-      m.transparent = a < 0.999 || m.userData.alwaysTransparent === true;
-      m.opacity = a;
-      o.visible = a > 0.01;
-    });
+  /** Bemalung auf eine Figur anwenden: null = weiss, {fill}, {png}. */
+  applyPaintTo(group, paint) {
+    const ud = group.userData;
+    if (!ud?.canvas || ud.kind === 'seeker') return;
+    const ctx = ud.canvas.getContext('2d');
+    const T = ud.canvas.width;
+    if (!paint) {
+      ctx.fillStyle = '#f2f2f0'; ctx.fillRect(0, 0, T, T);
+      ud.texture.needsUpdate = true;
+    } else if (paint.fill) {
+      const c = paint.fill;
+      ctx.fillStyle = `rgb(${c[0]},${c[1]},${c[2]})`; ctx.fillRect(0, 0, T, T);
+      ud.texture.needsUpdate = true;
+    } else if (paint.png) {
+      const img = new Image();
+      img.onload = () => { ctx.clearRect(0, 0, T, T); ctx.drawImage(img, 0, 0, T, T); ud.texture.needsUpdate = true; };
+      img.src = paint.png;
+    }
   }
 
-  /** Neuer Server-Snapshot: Puffer fuer Interpolation fuellen. */
+  applyPaint(id, paint, meId) {
+    if (id === meId) { if (this.me) this.applyPaintTo(this.me, paint); return; }
+    const e = this.entities.get(id);
+    if (e) this.applyPaintTo(e.group, paint);
+    else this.pendingPaint.set(id, paint);
+  }
+
   pushSnapshot(state, now) {
     const seen = new Set();
     for (const p of state.players) {
-      const e = this.ensureEntity(p.id, p.role, p.color, p.name);
+      const e = this.ensureEntity(p.id, p.role, p.name);
       e.name = p.name;
       e.lastSeen = now;
-      e.targetAlpha = p.alpha;
-      e.mark = !!p.mark;
+      e.pose = p.pose ?? 0;
       e.stun = p.stun || 0;
       e.decoy = !!p.decoy;
-      e.grapple = p.grapple;
       e.sprint = !!p.sprint;
       e.dash = !!p.dash;
-      e.absorbing = !!p.absorbing;
+      e.painting = !!p.painting;
       e.life = p.life;
-      if (e.role === C.ROLE_HIDER) this.setColor(e, p.color);
-      e.buf.push({ t: now, x: p.x, y: p.y, aim: p.aim });
+      e.buf.push({ t: now, x: p.x, y: p.y, yaw: p.yaw ?? 0, pitch: p.pitch ?? 0 });
       if (e.buf.length > 12) e.buf.shift();
       seen.add(p.id);
     }
-    // Nicht mehr gesendete Figuren ausblenden (Tarnung / ausser Sicht).
-    for (const e of this.entities.values()) {
-      if (!seen.has(e.id)) e.targetAlpha = 0;
-    }
-    // Scan-Ringe
-    const liveScans = new Set();
-    for (const s of state.scans) {
-      liveScans.add(s.id);
-      let r = this.rings.get(s.id);
-      if (!r) {
-        r = new THREE.Group();
-        const ring = new THREE.Mesh(new THREE.RingGeometry(0.93, 1, 72), new THREE.MeshBasicMaterial({ color: 0xff8c42, transparent: true, opacity: 0.9, side: THREE.DoubleSide, depthWrite: false }));
-        ring.rotation.x = -Math.PI / 2;
-        const disc = new THREE.Mesh(new THREE.CircleGeometry(1, 72), new THREE.MeshBasicMaterial({ color: 0xff8c42, transparent: true, opacity: 0.08, depthWrite: false }));
-        disc.rotation.x = -Math.PI / 2;
-        r.add(ring); r.add(disc);
-        r.position.set(s.x * U, 0.04, s.y * U);
-        r.userData = { ring, disc, r: 0, target: 0 };
-        this.scene.add(r);
-        this.rings.set(s.id, r);
-      }
-      r.userData.target = s.r * U;
-    }
-    for (const [id, r] of this.rings) {
-      if (!liveScans.has(id)) r.userData.fading = true;
-    }
-    // Farbkleckse
+    for (const e of this.entities.values()) if (!seen.has(e.id)) e.gone = true; else e.gone = false;
+
     const liveSplats = new Set();
     for (const s of state.splats) {
       const key = `${s.x},${s.y},${s.s}`;
@@ -226,7 +210,7 @@ export class Renderer {
         m.rotation.z = (s.s % 360) * Math.PI / 180;
         const sc = 0.7 + (s.s % 7) * 0.08;
         m.scale.set(sc, sc * (0.7 + (s.s % 5) * 0.1), 1);
-        m.position.set(s.x * U, 0.018 + (s.s % 10) * 0.0005, s.y * U);
+        m.position.set(s.x * U, 0.012 + (s.s % 10) * 0.0005, s.y * U);
         this.scene.add(m);
         this.splats.set(key, m);
       }
@@ -237,35 +221,17 @@ export class Renderer {
     }
   }
 
-  /** Eigene Figur anlegen/aktualisieren. */
-  ensureMe(role, color) {
-    if (this.me && this.meKind !== role) { this.scene.remove(this.me); this.disposeGroup(this.me); this.me = null; }
-    if (!this.me) {
-      this.me = this.makeModel(role, color);
-      this.meKind = role;
-      this.meColor = color.slice();
-      this.mePhase = 0;
-      this.scene.add(this.me);
-    }
-    if (role === C.ROLE_HIDER && (this.meColor[0] !== color[0] || this.meColor[1] !== color[1] || this.meColor[2] !== color[2])) {
-      this.meColor = color.slice();
-      const mats = this.me.userData.mats;
-      mats[0].color.copy(rgb(color));
-      mats[1].color.copy(rgb(color).offsetHSL(0, -0.05, 0.12));
-    }
-  }
-
   // ---------------------------------------------------------------- Effekte
-  burst(x, y, color, n = 14, speed = 3) {
+  burst(x, y, color, n = 14, speed = 3, h = 0.8) {
     const col = Array.isArray(color) ? rgb(color) : new THREE.Color(color);
     for (let i = 0; i < n; i++) {
       let m = this.particlePool.pop();
       if (!m) m = new THREE.Mesh(GEO.particle, new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true }));
       m.material.color.copy(col);
       m.material.opacity = 1;
-      m.position.set(x * U, 0.3, y * U);
+      m.position.set(x * U, h, y * U);
       const a = Math.random() * Math.PI * 2, sp = speed * (0.4 + Math.random() * 0.8);
-      m.userData = { vx: Math.cos(a) * sp, vy: 2 + Math.random() * 3, vz: Math.sin(a) * sp, life: 0.6 + Math.random() * 0.4, max: 1 };
+      m.userData = { vx: Math.cos(a) * sp, vy: 1.5 + Math.random() * 3, vz: Math.sin(a) * sp, life: 0.6 + Math.random() * 0.4 };
       m.userData.max = m.userData.life;
       m.scale.setScalar(0.7 + Math.random() * 0.8);
       this.scene.add(m);
@@ -273,120 +239,100 @@ export class Renderer {
     }
   }
 
-  lash(x, y, aim, hit) {
-    const t = makeTongue(hit ? 0xff4d6d : 0xff7aa2);
-    const a = new THREE.Vector3(x * U, 0.42, y * U);
-    const len = (C.CATCH_RANGE + 10) * U;
-    const b = new THREE.Vector3(a.x + Math.cos(aim) * len, 0.42, a.z + Math.sin(aim) * len);
-    aimTongue(t, a, b);
-    t.userData.life = 0.16;
-    this.scene.add(t);
-    this.lashes.push(t);
+  /** Schuss des Farbmarkierers: Leuchtspur plus Einschlag. */
+  shot(ev) {
+    const a = new THREE.Vector3(ev.from.x, ev.from.h, ev.from.y);
+    const b = new THREE.Vector3(ev.to.x, ev.to.h, ev.to.y);
+    const geo = new THREE.BufferGeometry().setFromPoints([a, b]);
+    const line = new THREE.Line(geo, new THREE.LineBasicMaterial({ color: ev.hit ? 0xff4d6d : 0xffb070, transparent: true, opacity: 0.95 }));
+    line.userData.life = 0.14;
+    this.scene.add(line);
+    this.tracers.push(line);
+    if (ev.wall) {
+      // Farbfleck an der Wand/am Boden, ausgerichtet an der Flaechennormalen.
+      const n = new THREE.Vector3(ev.wall.nx, ev.wall.nh, ev.wall.ny);
+      if (n.lengthSq() < 0.5) n.set(0, 1, 0);
+      const d = new THREE.Mesh(GEO.decal, new THREE.MeshBasicMaterial({ color: 0xff8c42, transparent: true, opacity: 0.9, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -2 }));
+      d.position.copy(b).addScaledVector(n, 0.01);
+      d.lookAt(b.clone().add(n));
+      d.scale.setScalar(0.8 + Math.random() * 0.6);
+      d.rotation.z = Math.random() * Math.PI;
+      this.scene.add(d);
+      this.decals.push(d);
+      if (this.decals.length > 80) { const old = this.decals.shift(); this.scene.remove(old); old.material.dispose(); }
+    } else if (ev.hit) {
+      this.burst(ev.to.x * C.TILE, ev.to.y * C.TILE, 0xff8c42, 18, 3, ev.to.h);
+    }
   }
 
   // ---------------------------------------------------------------- Frame
   /**
-   * @param {object} f {dt, now, me:{x,y,aim,role,alive,color,vis,grapple,absorb,stun,mark,sprint,dash,speed}, phase, meId, blind}
+   * @param {object} f {dt, now, me:{x,y,yaw,pitch,role,alive,pose,stun,speed,painting}, meId, paintMode}
    */
   update(f) {
     const dt = Math.min(f.dt, 0.05);
     this.clock += dt;
     const renderT = f.now - C.INTERP_DELAY_MS;
+    this.paintMode = !!f.paintMode;
 
-    // Eigene Figur
     if (f.me) {
-      this.ensureMe(f.me.role, f.me.color);
+      this.ensureMe(f.me.role);
       const g = this.me;
       g.position.set(f.me.x * U, 0, f.me.y * U);
-      const targetRot = -f.me.aim;
-      g.rotation.y += angleDiff(g.rotation.y, targetRot) * Math.min(1, dt * 14);
-      this.animate(g, f.me.speed ?? 0, dt, f.me.stun > 0);
-      // Eigene Sichtbarkeit als Feedback: getarnt = durchscheinend.
-      const selfAlpha = f.me.role === C.ROLE_HIDER ? 0.45 + 0.55 * f.me.vis : 1;
-      this.setOpacity(g, f.me.alive ? selfAlpha : 0);
-      // Eigener Ring immer sichtbar - auch wenn eine Mauer davor steht.
-      const ring = g.userData.ring;
-      ring.material.opacity = 0.85;
-      ring.material.depthTest = false;
-      ring.renderOrder = 999;
-      ring.material.color.set(f.me.role === C.ROLE_SEEKER ? 0xff8c42 : 0x7ee787);
-      if (g.userData.mark) g.userData.mark.material.opacity = f.me.mark > 0 ? 0.5 + Math.sin(this.clock * 12) * 0.4 : 0;
-      // Haken-Zunge
-      this.updateTongue('me', f.me.grapple, g.position, f.me.aim);
-      // Farbaufnahme-Ring
-      if (f.me.absorb > 0) {
-        this.absorbRing.position.set(g.position.x, 0.02, g.position.z);
-        this.absorbRing.material.opacity = 0.35 + f.me.absorb * 0.6;
-        this.absorbRing.scale.setScalar(1.4 - f.me.absorb * 0.5);
-        this.absorbRing.rotation.z += dt * 4;
-      } else this.absorbRing.material.opacity = 0;
-      if (this.me.userData.visor) this.me.userData.visor.material.emissiveIntensity = f.me.stun > 0 ? 0.1 : 0.9;
+      const targetRot = -f.me.yaw;
+      g.rotation.y += angleDiff(g.rotation.y, targetRot) * Math.min(1, dt * 16);
+      animateHumanoid(g, f.me.speed ?? 0, dt, f.me.pose, f.me.stun > 0, f.me.pitch);
+      g.visible = f.me.alive;
+      g.userData.ring.material.opacity = 0.7;
+      g.userData.ring.material.color.set(f.me.role === C.ROLE_SEEKER ? 0xff8c42 : 0x7ee787);
+      this.updateCamera(f, dt);
+    } else {
+      // Lobby/Menue: langsame Rundfahrt ueber die Karte
+      const t = this.clock * 0.08;
+      const cx = (this.map?.w ?? 60) / 2, cz = (this.map?.h ?? 40) / 2;
+      this.camera.position.set(cx + Math.cos(t) * 18, 12, cz + Math.sin(t) * 18);
+      this.camera.lookAt(cx, 0, cz);
     }
 
-    // Andere Figuren: interpolieren, ein-/ausblenden
     for (const e of this.entities.values()) {
       const pos = this.sample(e.buf, renderT);
       if (pos) {
-        if (!e.cur) e.cur = { x: pos.x, y: pos.y, aim: pos.aim };
+        if (!e.cur) e.cur = { x: pos.x, y: pos.y, yaw: pos.yaw, pitch: pos.pitch };
         const speed = Math.hypot(pos.x - e.cur.x, pos.y - e.cur.y) / Math.max(dt, 1e-3);
         e.cur.x = pos.x; e.cur.y = pos.y;
-        e.cur.aim += angleDiff(e.cur.aim, pos.aim) * Math.min(1, dt * 12);
+        e.cur.yaw += angleDiff(e.cur.yaw, pos.yaw) * Math.min(1, dt * 12);
+        e.cur.pitch = pos.pitch;
         e.group.position.set(pos.x * U, 0, pos.y * U);
-        e.group.rotation.y = -e.cur.aim;
+        e.group.rotation.y = -e.cur.yaw;
         e.speedEst = lerp(e.speedEst ?? 0, Math.min(speed, 400), 0.3);
       }
-      e.alpha += (e.targetAlpha - e.alpha) * Math.min(1, dt * (e.targetAlpha > e.alpha ? 9 : 5));
-      if (f.now - e.lastSeen > 2500 && e.alpha < 0.02) { this.removeEntity(e.id); continue; }
-      this.setOpacity(e.group, e.alpha);
-      this.animate(e.group, e.speedEst ?? 0, dt, e.stun > 0);
-      const ud = e.group.userData;
+      if (e.gone && f.now - e.lastSeen > 600) { this.removeEntity(e.id); continue; }
+      e.group.visible = !e.gone;
+      animateHumanoid(e.group, e.speedEst ?? 0, dt, e.pose, e.stun > 0, e.cur?.pitch ?? 0);
       const friendly = f.me && (e.role === C.ROLE_SEEKER ? f.me.role === C.ROLE_SEEKER : f.me.role === C.ROLE_HIDER);
-      ud.ring.material.opacity = friendly ? 0.45 * e.alpha : 0;
-      if (ud.mark) ud.mark.material.opacity = e.mark ? (0.5 + Math.sin(this.clock * 12) * 0.4) * e.alpha : 0;
-      if (ud.visor) ud.visor.material.emissiveIntensity = e.stun > 0 ? 0.1 : 0.9;
-      this.updateTongue(e.id, e.grapple, e.group.position, e.cur?.aim ?? 0, e.alpha);
+      e.group.userData.ring.material.opacity = friendly ? 0.4 : 0;
+      e.group.userData.ring.material.color.set(e.role === C.ROLE_SEEKER ? 0xff8c42 : 0x7ee787);
       this.updateLabel(e, f);
     }
 
-    // Kamera folgt weich, mit leichtem Blick in Zielrichtung
-    if (f.me) {
-      const lean = f.me.lean ?? { x: 0, y: 0 };
-      this.lookLean.lerp(new THREE.Vector3(lean.x * U, 0, lean.y * U), Math.min(1, dt * 4));
-      const want = new THREE.Vector3(f.me.x * U, 0, f.me.y * U).add(this.lookLean);
-      this.camTarget.lerp(want, Math.min(1, dt * 7));
-    }
-    this.camera.position.copy(this.camTarget).add(this.camOffset);
-    this.camera.lookAt(this.camTarget.x, 0.3, this.camTarget.z);
-    this.sun.position.set(this.camTarget.x + 9, 22, this.camTarget.z + 6);
-    this.sun.target.position.copy(this.camTarget);
+    const cx = this.camera.position.x, cz = this.camera.position.z;
+    this.sun.position.set(cx + 14, 16, cz + 9);
+    this.sun.target.position.set(cx, 0, cz);
+    this.fill.position.set(cx - 10, 8, cz - 12);
+    this.fill.target.position.set(cx, 0, cz);
 
-    // Scan-Ringe
-    for (const [id, r] of this.rings) {
-      const ud = r.userData;
-      ud.r += (ud.target - ud.r) * Math.min(1, dt * 12);
-      if (ud.fading) ud.r += dt * C.SCAN_SPEED * U;
-      const s = Math.max(0.01, ud.r);
-      r.scale.set(s, s, s);
-      const frac = Math.min(1, ud.r / (C.SCAN_RADIUS * U));
-      ud.ring.material.opacity = 0.9 * (1 - frac * frac);
-      ud.disc.material.opacity = 0.10 * (1 - frac);
-      if (frac >= 0.999) { this.scene.remove(r); this.rings.delete(id); }
-    }
-
-    // Zungenschlaege
-    for (let i = this.lashes.length - 1; i >= 0; i--) {
-      const t = this.lashes[i];
+    for (let i = this.tracers.length - 1; i >= 0; i--) {
+      const t = this.tracers[i];
       t.userData.life -= dt;
-      if (t.userData.life <= 0) { this.scene.remove(t); this.disposeGroup(t); this.lashes.splice(i, 1); }
+      t.material.opacity = Math.max(0, t.userData.life / 0.14);
+      if (t.userData.life <= 0) { this.scene.remove(t); t.geometry.dispose(); t.material.dispose(); this.tracers.splice(i, 1); }
     }
-
-    // Partikel
     for (let i = this.particles.length - 1; i >= 0; i--) {
       const m = this.particles[i], u = m.userData;
       u.life -= dt;
       u.vy -= 9 * dt;
       m.position.x += u.vx * dt; m.position.y += u.vy * dt; m.position.z += u.vz * dt;
-      if (m.position.y < 0.05) { m.position.y = 0.05; u.vy *= -0.3; u.vx *= 0.7; u.vz *= 0.7; }
+      if (m.position.y < 0.04) { m.position.y = 0.04; u.vy *= -0.3; u.vx *= 0.7; u.vz *= 0.7; }
       m.material.opacity = Math.max(0, u.life / u.max);
       if (u.life <= 0) { this.scene.remove(m); this.particles.splice(i, 1); this.particlePool.push(m); }
     }
@@ -395,7 +341,65 @@ export class Renderer {
     this.renderer.render(this.scene, this.camera);
   }
 
-  /** Position zum Zeitpunkt t aus dem Puffer interpolieren. */
+  /** Third-Person-Kamera: hinter der Figur, leicht ueber der Schulter, weicht Mauern aus. */
+  updateCamera(f, dt) {
+    const me = f.me;
+    const pivotH = this.paintMode ? 0.95 : 1.35;
+    let yaw, pitch, dist, side;
+    if (this.paintMode) { yaw = this.orbit.yaw; pitch = this.orbit.pitch; dist = this.orbit.dist; side = 0; }
+    else { yaw = me.yaw; pitch = me.pitch; dist = 3.1; side = 0.45; }
+    const rx = -Math.sin(yaw), rz = Math.cos(yaw);     // rechts
+    const pivot = { x: me.x * U + rx * side, y: pivotH, z: me.y * U + rz * side };
+    // Mauern ausweichen: Strahl vom Drehpunkt nach hinten. Ist der Platz knapp,
+    // schaut die Kamera stattdessen steiler von oben - so bleibt die Figur klein.
+    const free = (pt) => {
+      const dd = dirFromAngles(yaw, pt);
+      const hit = this.map ? raycast3D(this.map, { x: pivot.x, y: pivot.z, h: pivot.y }, { x: -dd.x, y: -dd.y, h: -dd.h }, dist + 0.3) : null;
+      return hit ? Math.max(0.35, hit.dist - 0.3) : dist;
+    };
+    let usePitch = pitch, useDist = free(pitch);
+    if (useDist < 1.4 && !this.paintMode) {
+      for (const extra of [0.35, 0.7, 1.05]) {
+        const pt = Math.max(-1.35, pitch - extra);     // negativer Nickwinkel = Blick nach unten
+        const fd = free(pt);
+        if (fd > useDist + 0.2) { useDist = fd; usePitch = pt; }
+        if (useDist >= 1.4) break;
+      }
+    }
+    this.camPitchSmooth = this.camPitchSmooth === undefined ? usePitch : this.camPitchSmooth + (usePitch - this.camPitchSmooth) * Math.min(1, dt * 6);
+    const d = dirFromAngles(yaw, this.paintMode ? pitch : this.camPitchSmooth);
+    dist = useDist;
+    const want = new THREE.Vector3(pivot.x - d.x * dist, pivot.y - d.h * dist, pivot.z - d.y * dist);
+    if (want.y < 0.15) want.y = 0.15;
+    const k = this.paintMode ? Math.min(1, dt * 10) : 1;
+    this.camPos.lerp(want, k);
+    this.camera.position.copy(this.camPos);
+    const look = new THREE.Vector3(pivot.x + d.x * 3, pivot.y + d.h * 3, pivot.z + d.y * 3);
+    if (this.paintMode) look.set(pivot.x, pivot.y, pivot.z);
+    this.camLook.lerp(look, k);
+    this.camera.lookAt(this.camLook);
+  }
+
+  /** Malmodus: Umlaufbahn mit dem meisten freien Platz um die Figur waehlen. */
+  chooseOrbit(yawHint) {
+    if (!this.me || !this.map) return;
+    const pivot = { x: this.me.position.x, y: this.me.position.z, h: 0.95 };
+    let best = { yaw: yawHint, pitch: 0.15, free: -1 };
+    for (let i = 0; i < 16; i++) {
+      const yaw = yawHint + (i / 16) * Math.PI * 2;
+      for (const pitch of [0.15, 0.5]) {
+        const dd = dirFromAngles(yaw, pitch);
+        const hit = raycast3D(this.map, pivot, { x: -dd.x, y: -dd.y, h: -dd.h }, this.orbit.dist + 0.3);
+        const fr = hit ? hit.dist : this.orbit.dist + 0.3;
+        // Bevorzugt die urspruengliche Richtung (i = 0) und flache Sicht
+        const score = fr - i * 0.02 - (pitch > 0.3 ? 0.15 : 0);
+        if (score > best.free) best = { yaw, pitch, free: score };
+      }
+    }
+    this.orbit.yaw = best.yaw;
+    this.orbit.pitch = best.pitch;
+  }
+
   sample(buf, t) {
     if (buf.length === 0) return null;
     if (buf.length === 1 || t <= buf[0].t) return buf[0];
@@ -403,65 +407,33 @@ export class Renderer {
       const a = buf[i], b = buf[i + 1];
       if (t >= a.t && t <= b.t) {
         const k = (t - a.t) / Math.max(1, b.t - a.t);
-        return { x: lerp(a.x, b.x, k), y: lerp(a.y, b.y, k), aim: a.aim + angleDiff(a.aim, b.aim) * k };
+        return { x: lerp(a.x, b.x, k), y: lerp(a.y, b.y, k), yaw: a.yaw + angleDiff(a.yaw, b.yaw) * k, pitch: lerp(a.pitch, b.pitch, k) };
       }
     }
-    // Ueber das Ende hinaus: kurz extrapolieren, dann stehen bleiben.
     const a = buf[buf.length - 2], b = buf[buf.length - 1];
     const k = Math.min(1.5, (t - b.t) / Math.max(1, b.t - a.t));
-    return { x: b.x + (b.x - a.x) * k * 0.5, y: b.y + (b.y - a.y) * k * 0.5, aim: b.aim };
-  }
-
-  animate(g, speed, dt, stunned) {
-    const ud = g.userData;
-    ud.phase = (ud.phase ?? 0) + dt * (2 + speed * 0.045);
-    const sw = Math.min(1, speed / 120);
-    ud.legs?.forEach((leg, i) => {
-      const dir = i % 2 === 0 ? 1 : -1;
-      const front = i < 2 ? 1 : -1;
-      leg.rotation.z = Math.sin(ud.phase * 2 + (i < 2 ? 0 : Math.PI)) * 0.55 * sw * dir * front;
-    });
-    if (ud.torso) ud.torso.position.y = (ud.kind === 'seeker' ? 0.40 : 0.28) + Math.abs(Math.sin(ud.phase * 2)) * 0.03 * sw + (ud.kind === 'seeker' ? 0 : Math.sin(ud.phase) * 0.006);
-    if (ud.tail) ud.tail.rotation.x = Math.sin(ud.phase * 1.3) * 0.25;
-    if (ud.head) ud.head.rotation.y = stunned ? Math.sin(ud.phase * 6) * 0.5 : Math.sin(ud.phase * 0.7) * 0.12;
-    g.rotation.z = stunned ? Math.sin(ud.phase * 5) * 0.15 : 0;
-  }
-
-  updateTongue(id, grapple, pos, aim, alpha = 1) {
-    let t = this.tongues.get(id);
-    if (!grapple) {
-      if (t) { this.scene.remove(t); this.disposeGroup(t); this.tongues.delete(id); }
-      return;
-    }
-    if (!t) { t = makeTongue(); this.scene.add(t); this.tongues.set(id, t); }
-    const a = new THREE.Vector3(pos.x + Math.cos(aim) * 0.4, 0.4, pos.z + Math.sin(aim) * 0.4);
-    const b = new THREE.Vector3(grapple.ax * U, 1.5, grapple.ay * U);
-    aimTongue(t, a, b);
-    t.userData.mesh.material.opacity = alpha; t.userData.mesh.material.transparent = alpha < 1;
-    t.userData.tip.material.opacity = alpha; t.userData.tip.material.transparent = alpha < 1;
+    return { x: b.x + (b.x - a.x) * k * 0.5, y: b.y + (b.y - a.y) * k * 0.5, yaw: b.yaw, pitch: b.pitch };
   }
 
   updateLabel(e, f) {
-    const show = e.name && e.alpha > 0.15;
-    if (!show) { if (e.labelEl) { e.labelEl.style.display = 'none'; } return; }
-    if (!e.labelEl) {
-      e.labelEl = document.createElement('div');
-      this.labelsEl.appendChild(e.labelEl);
-    }
+    const show = e.name && !e.gone && !this.paintMode;
+    if (!show) { if (e.labelEl) e.labelEl.style.display = 'none'; return; }
+    if (!e.labelEl) { e.labelEl = document.createElement('div'); this.labelsEl.appendChild(e.labelEl); }
     const cls = e.decoy ? 'decoy' : e.role === C.ROLE_SEEKER ? 'seeker' : '';
     e.labelEl.className = `label ${cls}`;
     e.labelEl.textContent = e.decoy ? `Köder ${e.life ?? ''}s` : e.name;
-    const v = new THREE.Vector3(e.group.position.x, 0.95, e.group.position.z).project(this.camera);
-    if (v.z > 1) { e.labelEl.style.display = 'none'; return; }
+    const v = new THREE.Vector3(e.group.position.x, C.POSES[e.pose]?.h + 0.25 || 2, e.group.position.z).project(this.camera);
+    if (v.z > 1 || v.x < -1 || v.x > 1 || v.y < -1 || v.y > 1) { e.labelEl.style.display = 'none'; return; }
     e.labelEl.style.display = '';
-    e.labelEl.style.opacity = String(Math.min(1, e.alpha * 1.5));
     e.labelEl.style.left = `${(v.x + 1) / 2 * window.innerWidth}px`;
     e.labelEl.style.top = `${(1 - v.y) / 2 * window.innerHeight}px`;
   }
 
   clearAll() {
     for (const id of [...this.entities.keys()]) this.removeEntity(id);
-    for (const [id, r] of this.rings) { this.scene.remove(r); this.rings.delete(id); }
     for (const [k, m] of this.splats) { this.scene.remove(m); this.splats.delete(k); }
+    for (const d of this.decals) { this.scene.remove(d); d.material.dispose(); }
+    this.decals = [];
+    this.pendingPaint.clear();
   }
 }

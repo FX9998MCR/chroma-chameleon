@@ -40,6 +40,23 @@ export function sanitizeChat(raw) {
     .slice(0, C.CHAT_MAX);
 }
 
+/**
+ * Prueft eine Bemalung aus dem Netz. Erlaubt: null (weiss), {fill:[r,g,b]},
+ * {png:'data:image/png;base64,...'} in begrenzter Groesse. Sonst undefined.
+ */
+export function validatePaint(raw) {
+  if (raw === null) return null;
+  if (!raw || typeof raw !== 'object') return undefined;
+  if (Array.isArray(raw.fill) && raw.fill.length === 3 && raw.fill.every((v) => Number.isFinite(v))) {
+    return { fill: raw.fill.map((v) => Math.max(0, Math.min(255, Math.round(v)))) };
+  }
+  if (typeof raw.png === 'string' && raw.png.startsWith('data:image/png;base64,') && raw.png.length <= C.PAINT_MAX_BYTES) {
+    if (!/^data:image\/png;base64,[A-Za-z0-9+/=]+$/.test(raw.png)) return undefined;
+    return { png: raw.png };
+  }
+  return undefined;
+}
+
 let nextClientId = 1;
 
 export class Room {
@@ -77,7 +94,7 @@ export class Room {
       while (taken.has(`${name.slice(0, C.NAME_MAX - 3)} ${n}`)) n++;
       name = `${name.slice(0, C.NAME_MAX - 3)} ${n}`;
     }
-    this.clients.set(id, { ws, name, lastSeen: Date.now(), msgBudget: 60 });
+    this.clients.set(id, { ws, name, lastSeen: Date.now(), paintBudget: C.PAINT_MSG_PER_SEC, paintRefill: Date.now() });
     if (!this.hostId) this.hostId = id;
     this.game.addPlayer(id, name);
     this.send(ws, {
@@ -91,6 +108,9 @@ export class Room {
       map: this.mapPayload,
       tick: C.TICK_RATE,
     });
+    // Bemalungen der Anwesenden nachliefern, sonst waeren alle weiss.
+    const items = this.game.paintSnapshot();
+    if (items.length) this.send(ws, { t: 'paintall', items });
     this.broadcastLobby();
     return id;
   }
@@ -134,8 +154,21 @@ export class Room {
     c.lastSeen = Date.now();
     switch (msg.t) {
       case 'input':
-        this.game.setInput(id, msg.k ?? {}, msg.a ?? null, Number(msg.aim), Number(msg.seq));
+        this.game.setInput(id, msg.k ?? {}, msg.a ?? null, msg.look ?? null, Number(msg.seq));
         break;
+      case 'paint': {
+        // Ratenbegrenzung: Texturen sind gross, mehr als ein paar pro Sekunde braucht niemand.
+        const now = Date.now();
+        c.paintBudget = Math.min(C.PAINT_MSG_PER_SEC, c.paintBudget + ((now - c.paintRefill) / 1000) * C.PAINT_MSG_PER_SEC);
+        c.paintRefill = now;
+        if (c.paintBudget < 1) return;
+        c.paintBudget -= 1;
+        const paint = validatePaint(msg.paint);
+        if (paint === undefined) return;
+        if (!this.game.setPaint(id, paint, msg.avg)) return;
+        this.broadcast({ t: 'paint', id, paint }, id);
+        break;
+      }
       case 'ready':
         this.game.setReady(id, !!msg.ready);
         this.broadcastLobby();
@@ -218,9 +251,9 @@ export class Room {
     });
   }
 
-  broadcast(obj) {
+  broadcast(obj, exceptId = null) {
     const data = JSON.stringify(obj);
-    for (const c of this.clients.values()) this.sendRaw(c.ws, data);
+    for (const [cid, c] of this.clients) if (cid !== exceptId) this.sendRaw(c.ws, data);
   }
 
   send(ws, obj) { this.sendRaw(ws, JSON.stringify(obj)); }

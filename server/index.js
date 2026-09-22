@@ -103,7 +103,7 @@ function health() {
 // ---------------------------------------------------------------- Server
 export function createServer() {
   const server = http.createServer(serveStatic);
-  const wss = new WebSocketServer({ server, maxPayload: 4096, clientTracking: true });
+  const wss = new WebSocketServer({ server, maxPayload: C.PAINT_MAX_BYTES + 8192, clientTracking: true });
 
   wss.on('connection', (ws) => {
     let room = null;

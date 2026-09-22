@@ -15,12 +15,33 @@
 <body>
 <div id="game"></div>
 <div id="labels"></div>
+<div id="crosshair" hidden></div>
+<div id="lockhint" hidden>Klicken, um dich umzuschauen · <kbd>Esc</kbd> gibt die Maus frei</div>
+
+<!-- Malmodus -->
+<aside id="paint-panel" hidden>
+  <h3>🎨 Malmodus</h3>
+  <div class="row"><div id="paint-swatch" class="swatch"></div>
+    <button id="paint-eye" class="mini" title="Leertaste">Pipette</button></div>
+  <p class="small">Cursor auf Wand/Boden/Objekt halten und <kbd>Leertaste</kbd> drücken – oder „Pipette" klicken.</p>
+  <label>Helligkeit <input id="paint-light" type="range" min="-60" max="60" value="0"></label>
+  <label>Pinsel <input id="paint-size" type="range" min="3" max="40" value="12"> <span id="paint-size-val">12</span></label>
+  <div id="paint-recent" class="recent"></div>
+  <div class="row">
+    <button id="paint-fill" class="mini">Ganz füllen</button>
+    <button id="paint-undo" class="mini">Rückgängig</button>
+    <button id="paint-clear" class="mini">Weiß</button>
+  </div>
+  <p class="small">Linke Maustaste: auf den Körper malen · Rechte Maustaste: um dich drehen · Mausrad: Pinselgröße</p>
+  <p id="paint-hint" class="small hint"></p>
+  <button id="paint-done" class="primary">Fertig (F)</button>
+</aside>
 
 <!-- Hauptmenue -->
 <section id="menu" class="overlay">
   <div class="panel">
     <h1><span class="logo"></span>Chroma Chameleon</h1>
-    <p class="tag">Tarne dich. Halte still. Werde nicht gefunden.</p>
+    <p class="tag">Mal dich an. Nimm eine Pose ein. Werde nicht gefunden.</p>
     <label class="field">
       <span>Dein Name</span>
       <input id="name" maxlength="16" autocomplete="off" spellcheck="false" placeholder="Chamäleon">
@@ -44,26 +65,25 @@
         <div>
           <h3>Chamäleon</h3>
           <ul>
-            <li><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> laufen · <kbd>Shift</kbd> sprinten (hinterlässt Farbspur!)</li>
-            <li><kbd>E</kbd> halten: Bodenfarbe aufnehmen</li>
-            <li><b>Stillhalten</b> + passende Farbe = fast unsichtbar</li>
-            <li><kbd>Rechtsklick</kbd> Zungenhaken zur Säule</li>
-            <li><kbd>Q</kbd> Köder absetzen – wer zuschlägt, ist kurz betäubt</li>
+            <li><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> laufen · Maus schaut · <kbd>Shift</kbd> sprinten</li>
+            <li><kbd>F</kbd> <b>Malmodus</b>: Pipette (<kbd>Leertaste</kbd>) nimmt Farbe von Wand, Boden oder Objekt, dann mit dem Pinsel auf den eigenen Körper malen</li>
+            <li><kbd>R</kbd> <b>Pose</b>: Hocken, Sitzen, Liegen, Wandpresse, Kugel – bricht die menschliche Silhouette</li>
+            <li><kbd>Q</kbd> Köder: eine bemalte Kopie von dir</li>
+            <li>Du startest <b>weiß</b>. Erst die Bemalung macht dich unsichtbar – und nur, wenn du stillhältst.</li>
           </ul>
         </div>
         <div>
-          <h3>Jäger</h3>
+          <h3>Sucher</h3>
           <ul>
-            <li><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> laufen · <kbd>Shift</kbd> Dash</li>
-            <li><kbd>Linksklick</kbd> Zungenschlag: fängt vor dir</li>
-            <li><kbd>Leertaste</kbd> Puls-Scan: verrät alles, was sich gerade bewegt hat</li>
-            <li>Nähe deckt auf: dicht ran, dann siehst du Umrisse</li>
-            <li>Gefangene Chamäleons werden zu Jägern</li>
+            <li><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> laufen · Maus schaut · <kbd>Shift</kbd> Dash</li>
+            <li><kbd>Linke Maustaste</kbd> Farbmarkierer: Treffer = gefunden</li>
+            <li>Genau hinsehen: falsche Farbtöne, Schatten, Kanten, Bewegung verraten Verstecke</li>
+            <li>Gefundene Chamäleons werden zu Suchern</li>
           </ul>
         </div>
       </div>
       <p class="small">Allein? <b>Solo-Training</b> startet sofort mit KI-Mitspielern; in jeder Lobby kann der Host Bots hinzufügen.</p>
-      <p class="small">Runde: 15 s Vorbereitung (Jäger sind blind), dann 150 s Jagd. 2 – 24 Spieler. Bei 2 – 4 Spielern ein Jäger, bei 5 – 8 zwei, usw.</p>
+      <p class="small">Runde: 15 s Verstecken & Anmalen (Sucher sind blind), dann 150 s Suche. 2 – 24 Spieler. Bei 2 – 4 Spielern ein Sucher, bei 5 – 8 zwei, usw.</p>
     </details>
   </div>
 </section>
@@ -99,7 +119,6 @@
   <div id="hud-bottom">
     <div id="bars">
       <div class="bar"><span class="bar-label">Ausdauer</span><div class="bar-track"><div id="stamina" class="bar-fill"></div></div></div>
-      <div class="bar" id="camo-bar"><span class="bar-label">Tarnung</span><div class="bar-track"><div id="camo" class="bar-fill camo"></div></div></div>
     </div>
     <div id="abilities"></div>
     <div id="score">0</div>
@@ -108,13 +127,13 @@
   <div id="prep-blind" hidden>
     <div class="blind-inner">
       <h2>Augen zu …</h2>
-      <p>Die Chamäleons verstecken sich.</p>
+      <p>Die Chamäleons verstecken sich und malen sich an.</p>
       <div id="blind-count">15</div>
     </div>
   </div>
   <div id="caught" hidden>
-    <h2>Erwischt!</h2>
-    <p>Du wirst in <span id="caught-count">3</span> s Jäger.</p>
+    <h2>Gefunden!</h2>
+    <p>Du wirst in <span id="caught-count">3</span> s Sucher.</p>
   </div>
   <div id="scoreboard" hidden>
     <table><thead><tr><th>#</th><th>Name</th><th>Rolle</th><th>Runde</th><th>Gesamt</th></tr></thead><tbody></tbody></table>

@@ -1,7 +1,7 @@
 // Geteilte Spielkonstanten. Server und Browser laden exakt diese Datei,
 // damit Vorhersage im Client und Autoritaet im Server nie auseinanderlaufen.
 
-export const PROTOCOL_VERSION = 3;
+export const PROTOCOL_VERSION = 4;
 
 // --- Takt und Welt ---------------------------------------------------------
 export const TICK_RATE = 20;                 // Server-Simulationen pro Sekunde
@@ -54,32 +54,35 @@ export const STAMINA_REGEN = 19;     // pro Sekunde in Ruhe
 export const STAMINA_REGEN_DELAY = 0.7; // Sekunden nach Sprintende
 export const STAMINA_SPRINT_MIN = 12;   // Mindestausdauer zum Losspurten
 
-// --- Tarnung ---------------------------------------------------------------
-// Sichtbarkeit 0 = perfekt getarnt, 1 = voll sichtbar.
-export const CAMO_COLOR_WEIGHT = 0.55;   // Anteil Farbuebereinstimmung
-export const CAMO_STILL_WEIGHT = 0.45;   // Anteil Bewegungslosigkeit
-export const CAMO_STILL_RAMP = 0.9;      // Sekunden Stillstand bis volle Wirkung
-export const CAMO_BUSH_BONUS = 0.14;     // Zusatzdeckung im Gebuesch
-export const CAMO_WATER_MALUS = 0.20;    // Wellen verraten
-export const CAMO_MAX_CONCEAL = 0.985;   // nie absolut unsichtbar
-export const CAMO_SHIMMER_TIME = 1.1;    // Sekunden sichtbares Flimmern nach Farbaufnahme
-export const CAMO_SHIMMER_FLOOR = 0.55;  // Mindestsichtbarkeit waehrend des Flimmerns
+// --- 3D-Welt ---------------------------------------------------------------
+// Eine Kachel entspricht einem Meter. Hoehen in Kacheln.
+export const WALL_H_INNER = 2.4;         // Innenmauern, blicken nicht drueber
+export const WALL_H_EDGE = 3.6;          // Aussenmauer
+export const PILLAR_H = 2.6;
+export const BUSH_H = 0.9;
+export const EYE_H = 1.55;               // Augenhoehe stehender Figur
+export const BODY_H = 1.75;              // Koerperhoehe stehend
+export const BODY_R = 0.34;              // Trefferradius (Kacheln)
+export const VIEW_RADIUS = 1400;         // Server sendet nur, was so nah ist (px)
 
-export const REVEAL_RADIUS = 96;         // ab hier sieht der Jaeger Umrisse
-export const REVEAL_HARD_RADIUS = 46;    // ab hier immer voll sichtbar
-export const VIEW_RADIUS = 900;          // Server sendet nur, was so nah ist
-export const SEND_ALPHA_MIN = 0.05;      // darunter wird gar nicht gesendet (Cheat-Schutz)
+// --- Malen ---------------------------------------------------------------
+export const PAINT_TEX = 512;            // Kantenlaenge der Koerpertextur
+export const PAINT_MAX_BYTES = 420_000;  // Obergrenze fuer eine Textur-Nachricht (Base64-PNG)
+export const PAINT_MSG_PER_SEC = 4;      // Ratenbegrenzung je Spieler
+export const BRUSH_MIN = 3;
+export const BRUSH_MAX = 40;
+export const BRUSH_DEFAULT = 12;
 
-// --- Farbaufnahme ----------------------------------------------------------
-export const ABSORB_TIME = 0.75;         // Sekunden Halten bis Farbwechsel
-export const ABSORB_MOVE_TOLERANCE = 42; // px/s, darueber bricht die Aufnahme ab
-
-// --- Zungenhaken (Chamaeleon) ---------------------------------------------
-export const GRAPPLE_RANGE = 288;
-export const GRAPPLE_PULL_SPEED = 540;
-export const GRAPPLE_COOLDOWN = 6.0;
-export const GRAPPLE_RELEASE_DIST = 34;  // so nah am Anker loest der Haken
-export const GRAPPLE_MAX_TIME = 1.6;     // Notbremse, falls der Zug haengt
+// --- Posen -----------------------------------------------------------------
+// Index -> Name; Details (Gliedmassen) stehen im Client, Trefferhoehe hier.
+export const POSES = [
+  { id: 'stand',  name: 'Stehen',      h: 1.75 },
+  { id: 'crouch', name: 'Hocken',      h: 1.15 },
+  { id: 'sit',    name: 'Sitzen',      h: 0.95 },
+  { id: 'lie',    name: 'Liegen',      h: 0.35 },
+  { id: 'press',  name: 'Wandpresse',  h: 1.75 },
+  { id: 'ball',   name: 'Kugel',       h: 0.75 },
+];
 
 // --- Koeder (Chamaeleon) ---------------------------------------------------
 export const DECOY_COOLDOWN = 24;
@@ -87,24 +90,15 @@ export const DECOY_LIFETIME = 22;
 export const DECOY_STUN = 1.6;           // Sekunden Betaeubung fuer den Jaeger
 export const DECOY_MAX_PER_PLAYER = 1;
 
-// --- Puls-Scan (Jaeger) ----------------------------------------------------
-export const SCAN_COOLDOWN = 9.0;
-export const SCAN_RADIUS = 330;
-export const SCAN_SPEED = 620;           // px/s Ausbreitung der Welle
-export const SCAN_MOTION_WINDOW = 1.6;   // Sekunden: so lange zaehlt Bewegung als frisch
-export const SCAN_MOTION_THRESHOLD = 26; // px/s, darueber gilt man als bewegt
-export const SCAN_MARK_TIME = 2.2;       // Sekunden Markierung nach Treffer
+// --- Farbmarkierer (Jaeger) ------------------------------------------------
+export const SHOT_RANGE = 16;            // Kacheln
+export const SHOT_COOLDOWN = 1.0;
+export const SHOT_SPREAD = 0.012;        // Radiant, leichte Streuung
 
 // --- Sprint-Dash (Jaeger) --------------------------------------------------
 export const DASH_COOLDOWN = 7.0;
 export const DASH_SPEED = 430;
 export const DASH_TIME = 0.28;
-
-// --- Fangen ----------------------------------------------------------------
-export const CATCH_RANGE = 62;
-export const CATCH_ARC = Math.PI * 0.55;  // Oeffnungswinkel des Zungenschlags
-export const CATCH_COOLDOWN = 1.15;
-export const CATCH_WINDUP = 0.0;
 
 // --- Farbspuren ------------------------------------------------------------
 export const SPLAT_INTERVAL = 0.24;      // Sekunden zwischen Klecksen beim Sprint
