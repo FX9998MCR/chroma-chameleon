@@ -18,6 +18,7 @@ export function makeRng(seed) {
   };
 }
 
+export const TILE_PX = TILE;   // Pixel je Kachel (Alias, damit Server-Code lesbar bleibt)
 export const idx = (tx, ty) => ty * MAP_W + tx;
 export const inBounds = (tx, ty) => tx >= 0 && ty >= 0 && tx < MAP_W && ty < MAP_H;
 export const worldToTileX = (x) => Math.floor(x / TILE);
@@ -46,6 +47,31 @@ export function tileColorAt(map, x, y) {
     case T_PILLAR: return WALL_COLOR;
     default: return PALETTE[map.colors[i]] ?? PALETTE[0];
   }
+}
+
+export const WALL_SHADE_INNER = 0.82;   // Innenmauern: Zonenfarbe leicht abgedunkelt
+export const WALL_SHADE_EDGE = 0.5;     // Aussenmauer: deutlich dunkler, ein Rahmen
+
+/** Farbe der Seitenflaechen einer festen Kachel (Mauer/Saeule) als [r,g,b]. */
+export function wallColorAt(map, tx, ty) {
+  if (!inBounds(tx, ty)) return WALL_COLOR;
+  const i = idx(tx, ty);
+  const t = map.tiles[i];
+  if (t === T_PILLAR) return WALL_COLOR;
+  if (t === T_WALL) {
+    const edge = tx < 2 || ty < 2 || tx >= MAP_W - 2 || ty >= MAP_H - 2;
+    const f = edge ? WALL_SHADE_EDGE : WALL_SHADE_INNER;
+    const c = PALETTE[map.colors[i]] ?? PALETTE[0];
+    return [Math.round(c[0] * f), Math.round(c[1] * f), Math.round(c[2] * f)];
+  }
+  return tileColorAt(map, tx * TILE + 1, ty * TILE + 1);
+}
+
+/** Farbe einer Oberflaeche, wie sie raycast3D liefert ('floor' oder 'wall'). */
+export function surfaceColor(map, hit) {
+  if (!hit) return WALL_COLOR;
+  if (hit.kind === 'wall') return wallColorAt(map, hit.tx, hit.ty);
+  return tileColorAt(map, hit.tx * TILE + 1, hit.ty * TILE + 1);
 }
 
 /** Setzt ein gefuelltes Rechteck, ohne den Kartenrand zu ueberschreiben. */
