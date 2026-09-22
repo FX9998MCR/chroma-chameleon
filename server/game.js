@@ -399,7 +399,8 @@ export class Game {
 
     // --- Farbaufnahme: stillhalten und E halten ------------------------
     const speedNow = Math.hypot(p.vx, p.vy);
-    if (isHider && inp.absorb && speedNow < C.ABSORB_MOVE_TOLERANCE && !isSolidAt(this.map, p.x, p.y)) {
+    const wantsMove = inp.up || inp.down || inp.left || inp.right;
+    if (isHider && inp.absorb && !wantsMove && speedNow < C.ABSORB_MOVE_TOLERANCE && !isSolidAt(this.map, p.x, p.y)) {
       p.absorbing += dt;
       if (p.absorbing >= C.ABSORB_TIME) {
         p.color = tileColorAt(this.map, p.x, p.y).slice();
@@ -412,8 +413,7 @@ export class Game {
     }
 
     // --- Bewegung ------------------------------------------------------
-    const moveInput = p.absorbing > 0 ? EMPTY_INPUT : inp;
-    const sprinting = stepMovement(p, moveInput, dt, this.map, { sprintAllowed });
+    const sprinting = stepMovement(p, inp, dt, this.map, { sprintAllowed });
     p.sprinting = sprinting;
     const speed = Math.hypot(p.vx, p.vy);
 
