@@ -13,7 +13,8 @@ const $ = (id) => document.getElementById(id);
 
 const ui = {
   menu: $('menu'), lobby: $('lobby'), name: $('name'), code: $('code'), menuError: $('menu-error'),
-  btnQuick: $('btn-quick'), btnCreate: $('btn-create'), btnJoin: $('btn-join'),
+  btnQuick: $('btn-quick'), btnCreate: $('btn-create'), btnJoin: $('btn-join'), btnSolo: $('btn-solo'),
+  botrow: $('botrow'), btnAddBot: $('btn-addbot'), btnRemoveBot: $('btn-removebot'),
   lobbyCode: $('lobby-code'), invite: $('invite'), btnCopy: $('btn-copy'), lobbyPlayers: $('lobby-players'),
   lobbyHint: $('lobby-hint'), btnReady: $('btn-ready'), btnStart: $('btn-start'), btnLeave: $('btn-leave'),
   disconnected: $('disconnected'), discReason: $('disc-reason'), btnReload: $('btn-reload'), chatInput: $('chat-input'),
@@ -58,12 +59,15 @@ function start(mode) {
   showError('');
   audio.unlock();
   setButtons(false);
-  connect({ mode, name, room, public: false });
+  connect({ mode, name, room, public: false, bots: 3 });
 }
 
-function setButtons(on) { for (const b of [ui.btnQuick, ui.btnCreate, ui.btnJoin]) b.disabled = !on; }
+function setButtons(on) { for (const b of [ui.btnQuick, ui.btnCreate, ui.btnJoin, ui.btnSolo]) b.disabled = !on; }
 
 ui.btnQuick.onclick = () => start('quick');
+ui.btnSolo.onclick = () => start('solo');
+ui.btnAddBot.onclick = () => net?.send({ t: 'addbot' });
+ui.btnRemoveBot.onclick = () => net?.send({ t: 'removebot' });
 ui.btnCreate.onclick = () => start('create');
 ui.btnJoin.onclick = () => start('join');
 ui.code.addEventListener('keydown', (e) => { if (e.key === 'Enter') start('join'); });
@@ -95,7 +99,7 @@ function renderLobby(msg) {
   ui.lobbyPlayers.innerHTML = '';
   for (const p of msg.players) {
     const li = document.createElement('li');
-    li.className = p.ready ? 'ready' : '';
+    li.className = (p.ready ? 'ready' : '') + (p.bot ? ' bot' : '');
     const nm = document.createElement('span');
     nm.textContent = (p.id === msg.hostId ? '👑 ' : '') + p.name + (p.id === S.meId ? ' (du)' : '');
     const st = document.createElement('span');
@@ -112,6 +116,9 @@ function renderLobby(msg) {
     ? `Mindestens ${msg.min} Spieler nötig – lade jemanden ein (${n}/${msg.max}).`
     : `Startet, wenn alle bereit sind – oder der Host startet. ${n}/${msg.max} Spieler.`;
   ui.btnStart.hidden = !(msg.hostId === S.meId && msg.canStart);
+  ui.botrow.hidden = msg.hostId !== S.meId;
+  ui.btnAddBot.disabled = n >= msg.max;
+  ui.btnRemoveBot.disabled = !msg.players.some((p) => p.bot);
   const inLobbyPhase = msg.phase === C.PHASE_LOBBY;
   ui.lobby.hidden = !inLobbyPhase;
   if (!inLobbyPhase) { S.ready = false; ui.btnReady.textContent = 'Bereit'; ui.btnReady.classList.remove('on'); }

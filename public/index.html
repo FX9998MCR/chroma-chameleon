@@ -29,6 +29,9 @@
       <button id="btn-quick" class="primary">Schnellspiel</button>
       <button id="btn-create">Privaten Raum erstellen</button>
     </div>
+    <div class="buttons">
+      <button id="btn-solo">🤖 Solo-Training mit 3 Bots</button>
+    </div>
     <div class="joinrow">
       <input id="code" maxlength="4" autocomplete="off" spellcheck="false" placeholder="RAUMCODE">
       <button id="btn-join">Beitreten</button>
@@ -59,6 +62,7 @@
           </ul>
         </div>
       </div>
+      <p class="small">Allein? <b>Solo-Training</b> startet sofort mit KI-Mitspielern; in jeder Lobby kann der Host Bots hinzufügen.</p>
       <p class="small">Runde: 15 s Vorbereitung (Jäger sind blind), dann 150 s Jagd. 2 – 24 Spieler. Bei 2 – 4 Spielern ein Jäger, bei 5 – 8 zwei, usw.</p>
     </details>
   </div>
@@ -71,6 +75,11 @@
     <p class="small">Einladungslink: <a id="invite" href="#" target="_blank" rel="noopener"></a> <button id="btn-copy" class="mini">kopieren</button></p>
     <ul id="lobby-players"></ul>
     <p id="lobby-hint" class="small"></p>
+    <div class="buttons botrow" id="botrow" hidden>
+      <button id="btn-addbot" class="mini">+ Bot</button>
+      <button id="btn-removebot" class="mini">− Bot</button>
+      <span class="small">Bots verstecken sich und jagen selbstständig – ideal zum Üben.</span>
+    </div>
     <div class="buttons">
       <button id="btn-ready" class="primary">Bereit</button>
       <button id="btn-start" hidden>Runde starten</button>

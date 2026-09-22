@@ -4,6 +4,7 @@
 import * as C from '../shared/constants.js';
 import { generateMap, serializeMap } from '../shared/map.js';
 import { Game } from './game.js';
+import { BotBrain, BOT_NAMES } from './bots.js';
 
 const ROOM_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // ohne I/O/0/1, gut ablesbar
 
@@ -13,10 +14,18 @@ export function randomRoomCode(rng = Math.random) {
   return s;
 }
 
+/** Zeichenbereiche als Codepunkte, damit keine Escape-Sequenzen im Quelltext stehen. */
+function rangeClass(ranges) {
+  return new RegExp('[' + ranges.map(([a, b]) => String.fromCharCode(a) + '-' + String.fromCharCode(b)).join('') + ']', 'g');
+}
+// Steuerzeichen (0-31, 127-159), Nullbreiten-Zeichen (8203-8207), Zeilentrenner (8232-8233)
+const INVISIBLE_NAME = rangeClass([[0, 31], [127, 159], [8203, 8207], [8232, 8233]]);
+const CONTROL_CHARS = rangeClass([[0, 31], [127, 159]]);
+
 /** Spielername bereinigen: sichtbare Zeichen, begrenzte Laenge, nie leer. */
 export function sanitizeName(raw) {
   let s = String(raw ?? '')
-    .replace(/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u2028\u2029]/g, '')
+    .replace(INVISIBLE_NAME, '')
     .replace(/\s+/g, ' ')
     .trim()
     .slice(0, C.NAME_MAX);
@@ -26,7 +35,7 @@ export function sanitizeName(raw) {
 
 export function sanitizeChat(raw) {
   return String(raw ?? '')
-    .replace(/[\u0000-\u001f\u007f-\u009f]/g, '')
+    .replace(CONTROL_CHARS, '')
     .trim()
     .slice(0, C.CHAT_MAX);
 }
@@ -42,6 +51,8 @@ export class Room {
     this.mapPayload = serializeMap(this.map);
     this.game = new Game(this.map, { rng: opts.rng });
     this.clients = new Map();   // id -> {ws, name, lastSeen, msgBudget}
+    this.bots = new Map();      // id -> BotBrain
+    this.botSerial = 0;
     this.hostId = null;
     this.createdAt = Date.now();
     this.lastLobbyAt = 0;
@@ -50,7 +61,8 @@ export class Room {
   }
 
   get size() { return this.clients.size; }
-  isFull() { return this.clients.size >= C.MAX_PLAYERS; }
+  get total() { return this.clients.size + this.bots.size; }
+  isFull() { return this.total >= C.MAX_PLAYERS; }
   isEmpty() { return this.clients.size === 0; }
 
   /** Nimmt eine Verbindung auf und schickt Begruessung + Karte. */
@@ -83,6 +95,28 @@ export class Room {
     return id;
   }
 
+  /** Fuegt einen KI-Mitspieler hinzu. Liefert false, wenn der Raum voll ist. */
+  addBot() {
+    if (this.isFull()) return false;
+    const id = 'bot' + (++this.botSerial);
+    const used = new Set([...this.game.players.values()].map((p) => p.name));
+    let name = BOT_NAMES.find((n) => !used.has(n)) ?? `Bot ${this.botSerial}`;
+    const p = this.game.addPlayer(id, name);
+    p.bot = true;
+    this.bots.set(id, new BotBrain(this.game, id));
+    this.broadcastLobby();
+    return true;
+  }
+
+  removeBot() {
+    const last = [...this.bots.keys()].pop();
+    if (!last) return false;
+    this.bots.delete(last);
+    this.game.removePlayer(last);
+    this.broadcastLobby();
+    return true;
+  }
+
   leave(id) {
     if (!this.clients.has(id)) return;
     this.clients.delete(id);
@@ -112,6 +146,12 @@ export class Room {
           this.broadcastLobby();
         }
         break;
+      case 'addbot':
+        if (id === this.hostId) this.addBot();
+        break;
+      case 'removebot':
+        if (id === this.hostId) this.removeBot();
+        break;
       case 'chat': {
         const text = sanitizeChat(msg.text);
         if (!text) return;
@@ -138,6 +178,7 @@ export class Room {
     const stepDt = C.TICK_MS / 1000;
     let steps = 0;
     while (this.accumulator >= stepDt && steps < 5) {
+      for (const b of this.bots.values()) b.think(stepDt);
       this.game.update(stepDt);
       this.accumulator -= stepDt;
       steps++;

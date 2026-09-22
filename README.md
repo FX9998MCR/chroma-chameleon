@@ -10,6 +10,16 @@ Puls-Scans, Nähe und einem schnellen Zungenschlag. Wer erwischt wird, jagt mit.
 - 3D-Darstellung mit Three.js, prozedurale Low-Poly-Modelle, kein Download nötig
 - Keine externen Dienste, keine Konten, keine Tracker
 
+## Allein spielen
+
+Im Menü **„Solo-Training mit 3 Bots"** wählen – das Spiel startet sofort mit
+KI-Mitspielern. In jeder privaten Lobby kann der Host mit **+ Bot / − Bot** beliebig
+viele Bots hinzufügen (bis zur Raumgrenze von 24). Bots verstecken sich, färben sich
+ein, fliehen vor nahen Jägern, setzen Köder und nutzen den Zungenhaken; als Jäger
+patrouillieren sie, scannen, verfolgen Sichtungen und schlagen zu. Sie spielen nach
+denselben Regeln und mit derselben Sichtbarkeitslogik wie Menschen – auch sie fallen
+auf Köder herein.
+
 ## Schnellstart
 
 ```bash
@@ -79,6 +89,7 @@ server/index.js    HTTP-Server für Spieldateien + WebSocket-Server, Räume, Rat
 server/room.js     Ein Raum: Beitritt, Lobby, Chat, Snapshot-Versand im 20-Hz-Takt
 server/game.js     Autoritative Simulation: Phasen, Rollen, Fangen, Scan, Haken, Köder,
                    Sichtbarkeits-Culling je Empfänger
+server/bots.js     KI-Mitspieler: Breitensuche-Wegfindung, Versteck-/Flucht-/Jagdlogik
 shared/constants.js  Alle Spielwerte an einer Stelle (Tempo, Abklingzeiten, Punkte …)
 shared/map.js        Arena-Generator (deterministisch per Seed) + Kachel-Hilfen
 shared/physics.js    Bewegung, Kollision, Tarnungs-Mathematik – identisch auf Server und Client
@@ -113,10 +124,11 @@ Kachel erreichbar ist. Jeder Raum bekommt einen eigenen Seed.
 npm test
 ```
 
-49 Tests: Kartengenerator (Determinismus, Zusammenhang, Anker), Physik (Kollision,
+55 Tests: Kartengenerator (Determinismus, Zusammenhang, Anker), Physik (Kollision,
 Gleiten, Tempo, Tarnung), Spielregeln (Rollen, Phasen, Fangen mit Sichtlinie, Köder,
-Scan, Haken, Ausdauer, Punkte, Snapshot-Culling) und ein Integrationstest mit echtem
-HTTP- und WebSocket-Server.
+Scan, Haken, Ausdauer, Punkte, Snapshot-Culling), Bots (Wegfindung, Verstecken,
+Fangen, Stresstest über mehrere Runden) und ein Integrationstest mit echtem HTTP- und
+WebSocket-Server.
 
 ## Deployment
 
