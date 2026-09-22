@@ -1,0 +1,27 @@
+{
+  "name": "chroma-chameleon",
+  "version": "1.0.0",
+  "description": "Chroma Chameleon - Online-Multiplayer-Versteckspiel. Chamaeleons tarnen sich per Farbe und Stillstand, Jaeger suchen sie mit Puls-Scans.",
+  "type": "module",
+  "main": "server/index.js",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "scripts": {
+    "start": "node server/index.js",
+    "dev": "node --watch server/index.js",
+    "test": "node --test test/"
+  },
+  "keywords": [
+    "multiplayer",
+    "game",
+    "websocket",
+    "hide-and-seek",
+    "canvas"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "three": "^0.186.0",
+    "ws": "^8.18.0"
+  }
+}
