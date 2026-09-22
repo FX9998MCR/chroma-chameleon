@@ -43,6 +43,7 @@ export function makePlayer(id, name) {
     survivePts: 0,                 // Bruchteile fuer Sekundenpunkte
     catches: 0,
     seekerRounds: 0,               // Fairness bei der Rollenverteilung
+    bot: false,
     ready: false,
     input: { ...EMPTY_INPUT },
     actions: { primary: false, decoy: false, grapple: false, scan: false, dash: false },
@@ -163,8 +164,13 @@ export class Game {
 
   allReady() {
     if (this.players.size < C.MIN_PLAYERS) return false;
-    for (const p of this.players.values()) if (!p.ready) return false;
-    return true;
+    let humans = 0;
+    for (const p of this.players.values()) {
+      if (p.bot) continue;
+      humans++;
+      if (!p.ready) return false;
+    }
+    return humans > 0;
   }
 
   startRound() {
@@ -712,7 +718,7 @@ export class Game {
     return [...this.players.values()]
       .sort((a, b) => b.score - a.score || a.name.localeCompare(b.name))
       .map((p) => ({
-        id: p.id, name: p.name, role: p.role, alive: p.alive, ready: p.ready,
+        id: p.id, name: p.name, role: p.role, alive: p.alive, ready: p.ready || p.bot, bot: p.bot,
         score: p.score, roundScore: Math.round(p.roundScore), catches: p.catches,
       }));
   }
