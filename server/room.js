@@ -14,10 +14,18 @@ export function randomRoomCode(rng = Math.random) {
   return s;
 }
 
+/** Zeichenbereiche als Codepunkte, damit keine Escape-Sequenzen im Quelltext stehen. */
+function rangeClass(ranges) {
+  return new RegExp('[' + ranges.map(([a, b]) => String.fromCharCode(a) + '-' + String.fromCharCode(b)).join('') + ']', 'g');
+}
+// Steuerzeichen (0-31, 127-159), Nullbreiten-Zeichen (8203-8207), Zeilentrenner (8232-8233)
+const INVISIBLE_NAME = rangeClass([[0, 31], [127, 159], [8203, 8207], [8232, 8233]]);
+const CONTROL_CHARS = rangeClass([[0, 31], [127, 159]]);
+
 /** Spielername bereinigen: sichtbare Zeichen, begrenzte Laenge, nie leer. */
 export function sanitizeName(raw) {
   let s = String(raw ?? '')
-    .replace(/[\u0000-\u001f\u007f-\u009f​-‏  ]/g, '')
+    .replace(INVISIBLE_NAME, '')
     .replace(/\s+/g, ' ')
     .trim()
     .slice(0, C.NAME_MAX);
@@ -27,7 +35,7 @@ export function sanitizeName(raw) {
 
 export function sanitizeChat(raw) {
   return String(raw ?? '')
-    .replace(/[\u0000-\u001f\u007f-\u009f]/g, '')
+    .replace(CONTROL_CHARS, '')
     .trim()
     .slice(0, C.CHAT_MAX);
 }
