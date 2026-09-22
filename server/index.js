@@ -131,9 +131,15 @@ export function createServer() {
           ws.close(4002, 'version');
           return;
         }
-        const mode = msg.mode === 'join' || msg.mode === 'quick' ? msg.mode : 'create';
+        const mode = ['join', 'quick', 'solo'].includes(msg.mode) ? msg.mode : 'create';
         let target;
         if (mode === 'quick') target = findPublicRoom();
+        else if (mode === 'solo') {
+          // Training allein: privater Raum, sofort mit KI-Mitspielern gefuellt.
+          target = createRoom(false);
+          const n = Math.min(8, Math.max(1, Number(msg.bots) || 3));
+          for (let i = 0; i < n; i++) target.addBot();
+        }
         else if (mode === 'join') {
           const code = String(msg.room ?? '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, C.ROOM_CODE_LEN);
           target = rooms.get(code);
