@@ -1,214 +1,232 @@
-// Prozedurale Low-Poly-Modelle. Alles aus Grundkoerpern gebaut, keine Dateien.
-// Einheit: 1 = eine Kachel. Modelle schauen entlang +X.
+// Prozedurale Figuren. Einheit: 1 = eine Kachel = ein Meter. Figuren schauen entlang +X.
 //
-// Eigene Blender-Modelle koennen spaeter ueber GLTFLoader eingehaengt werden:
-// dazu die passende make*-Funktion durch den geladenen Scene-Graph ersetzen und
-// `userData.mats` (einfaerbbare Materialien) sowie `userData.anim` setzen.
+// Das Mannequin besteht aus Quadern, die alle EINE Textur teilen (Atlas).
+// Jede Quaderflaeche bekommt ein eigenes Feld im Atlas, damit Vorder- und
+// Rueckseite unabhaengig bemalt werden koennen - so wie man sich im Vorbild
+// mit dem Pinsel Stueck fuer Stueck anmalt.
 
 import * as THREE from 'three';
+import { PAINT_TEX, POSES } from '/shared/constants.js';
 
 export function rgb(c) {
   return new THREE.Color().setRGB(c[0] / 255, c[1] / 255, c[2] / 255, THREE.SRGBColorSpace);
 }
 
-function std(color, extra = {}) {
-  return new THREE.MeshStandardMaterial({ color, roughness: 0.7, metalness: 0.05, ...extra });
+// ---------------------------------------------------------------- Atlas
+// Koerperteile und ihre Felder im Atlas (Spalte, Zeile) auf einem 4x4-Raster.
+// Jedes Teil bekommt ein Feld; die 6 Quaderflaechen werden darin als 3x2-Raster verteilt.
+export const PARTS = [
+  { key: 'head',   size: [0.24, 0.26, 0.24], cell: [0, 0], pivot: [0, 1.42, 0], offset: [0, 0.13, 0] },
+  { key: 'torso',  size: [0.24, 0.55, 0.42], cell: [1, 0], pivot: [0, 0.85, 0], offset: [0, 0.28, 0] },
+  { key: 'hips',   size: [0.24, 0.16, 0.38], cell: [2, 0], pivot: [0, 0.85, 0], offset: [0, -0.08, 0] },
+  { key: 'armUL',  size: [0.12, 0.30, 0.12], cell: [3, 0], pivot: [0, 1.36, 0.28], offset: [0, -0.15, 0] },
+  { key: 'armUR',  size: [0.12, 0.30, 0.12], cell: [0, 1], pivot: [0, 1.36, -0.28], offset: [0, -0.15, 0] },
+  { key: 'armLL',  size: [0.11, 0.30, 0.11], cell: [1, 1], pivot: [0, -0.30, 0], offset: [0, -0.15, 0], parent: 'armUL' },
+  { key: 'armLR',  size: [0.11, 0.30, 0.11], cell: [2, 1], pivot: [0, -0.30, 0], offset: [0, -0.15, 0], parent: 'armUR' },
+  { key: 'legUL',  size: [0.15, 0.40, 0.15], cell: [3, 1], pivot: [0, 0.78, 0.11], offset: [0, -0.20, 0] },
+  { key: 'legUR',  size: [0.15, 0.40, 0.15], cell: [0, 2], pivot: [0, 0.78, -0.11], offset: [0, -0.20, 0] },
+  { key: 'legLL',  size: [0.13, 0.38, 0.13], cell: [1, 2], pivot: [0, -0.40, 0], offset: [0, -0.19, 0], parent: 'legUL' },
+  { key: 'legLR',  size: [0.13, 0.38, 0.13], cell: [2, 2], pivot: [0, -0.40, 0], offset: [0, -0.19, 0], parent: 'legUR' },
+];
+const GRID = 4;
+
+/** Quader mit UVs, die in das Atlasfeld (cx,cy) fallen; je Flaeche ein 3x2-Unterfeld. */
+function partGeometry(size, cell) {
+  const geo = new THREE.BoxGeometry(size[0], size[1], size[2]);
+  const uv = geo.attributes.uv;
+  const u0 = cell[0] / GRID, v0 = 1 - (cell[1] + 1) / GRID;   // Atlasfeld (v von unten)
+  const cw = 1 / GRID, ch = 1 / GRID;
+  for (let i = 0; i < uv.count; i++) {
+    const face = Math.floor(i / 4);                 // 0..5: +x -x +y -y +z -z
+    const fx = face % 3, fy = Math.floor(face / 3); // 3x2-Raster im Feld
+    const u = uv.getX(i), v = uv.getY(i);
+    const pad = 0.02;                                // kleiner Rand gegen Kantenbluten
+    const uu = u0 + (fx + pad + u * (1 - 2 * pad)) * (cw / 3);
+    const vv = v0 + (fy + pad + v * (1 - 2 * pad)) * (ch / 2);
+    uv.setXY(i, uu, vv);
+  }
+  return geo;
 }
 
-/** Chamaeleon: Rumpf, Kopf mit Helmkamm, Turmaugen, vier Beine, Ringelschwanz. */
-export function makeChameleon(colorArr) {
+/** Leere (weisse) Koerpertextur als Canvas. */
+export function makePaintCanvas(fill = '#f2f2f0') {
+  const cv = document.createElement('canvas');
+  cv.width = PAINT_TEX; cv.height = PAINT_TEX;
+  // Der Kontext wird haeufig gelesen (Rueckgaengig, Durchschnittsfarbe) - das sagt man dem Browser besser vorher.
+  const ctx = cv.getContext('2d', { willReadFrequently: true });
+  ctx.fillStyle = fill;
+  ctx.fillRect(0, 0, PAINT_TEX, PAINT_TEX);
+  return cv;
+}
+
+export function makePaintTexture(canvas) {
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.magFilter = THREE.LinearFilter;
+  tex.minFilter = THREE.LinearFilter;
+  tex.generateMipmaps = false;
+  return tex;
+}
+
+/**
+ * Mannequin. Rueckgabe: Group mit userData {parts: {key: Mesh}, canvas, texture, material, kind}.
+ * Fuer Jaeger wird eine dunkle Montur mit Visier erzeugt (nicht bemalbar).
+ */
+export function makeHumanoid(kind = 'hider') {
   const g = new THREE.Group();
-  const col = rgb(colorArr);
-  const body = std(col);
-  const belly = std(col.clone().offsetHSL(0, -0.05, 0.12));
-  const mats = [body, belly];
+  const canvas = makePaintCanvas(kind === 'seeker' ? '#4a4f5c' : '#f2f2f0');
+  const texture = makePaintTexture(canvas);
+  const material = new THREE.MeshStandardMaterial({
+    map: texture, roughness: kind === 'seeker' ? 0.55 : 0.85, metalness: kind === 'seeker' ? 0.15 : 0.0,
+  });
+  const parts = {};
+  const joints = {};
+  for (const p of PARTS) {
+    const joint = new THREE.Group();
+    joint.position.set(p.pivot[0], p.pivot[1], p.pivot[2]);
+    const mesh = new THREE.Mesh(partGeometry(p.size, p.cell), material);
+    mesh.position.set(p.offset[0], p.offset[1], p.offset[2]);
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+    mesh.userData.part = p.key;
+    joint.add(mesh);
+    parts[p.key] = mesh;
+    joints[p.key] = joint;
+    (p.parent ? joints[p.parent] : g).add(joint);
+  }
+  // Der Rumpf haengt an der Huefte, damit Beugen den Oberkoerper mitnimmt.
+  // (Kopf und Arme sind direkt an der Gruppe verankert und werden ueber die Pose mitgefuehrt.)
 
-  const torso = new THREE.Mesh(new THREE.CapsuleGeometry(0.19, 0.42, 4, 10), body);
-  torso.rotation.z = Math.PI / 2;
-  torso.position.set(0, 0.28, 0);
-  torso.scale.set(1, 1.15, 0.9);
-  torso.castShadow = true;
-  g.add(torso);
-
-  const head = new THREE.Mesh(new THREE.SphereGeometry(0.17, 12, 10), body);
-  head.position.set(0.38, 0.34, 0);
-  head.scale.set(1.25, 0.95, 0.9);
-  head.castShadow = true;
-  g.add(head);
-
-  const crest = new THREE.Mesh(new THREE.ConeGeometry(0.11, 0.22, 4), body);
-  crest.position.set(0.30, 0.50, 0);
-  crest.rotation.z = -0.5;
-  g.add(crest);
-
-  // Turmaugen: weisse Halbkugeln mit dunkler Pupille, links und rechts.
-  const eyeMat = std(0xf4f4f0, { roughness: 0.35 });
-  const pupilMat = std(0x111111, { roughness: 0.3 });
-  for (const s of [-1, 1]) {
-    const eye = new THREE.Mesh(new THREE.SphereGeometry(0.075, 10, 8), eyeMat);
-    eye.position.set(0.42, 0.40, s * 0.13);
-    g.add(eye);
-    const pupil = new THREE.Mesh(new THREE.SphereGeometry(0.032, 8, 6), pupilMat);
-    pupil.position.set(0.47, 0.41, s * 0.155);
-    g.add(pupil);
+  if (kind === 'seeker') {
+    const visor = new THREE.Mesh(
+      new THREE.BoxGeometry(0.05, 0.07, 0.2),
+      new THREE.MeshStandardMaterial({ color: 0xff8c42, emissive: 0xff8c42, emissiveIntensity: 1.2, roughness: 0.3 }),
+    );
+    visor.position.set(0.13, 0.15, 0);
+    joints.head.add(visor);
+    // Farbmarkierer in der rechten Hand
+    const gun = new THREE.Group();
+    const body = new THREE.Mesh(new THREE.BoxGeometry(0.34, 0.08, 0.07), new THREE.MeshStandardMaterial({ color: 0x1c1e26, metalness: 0.5, roughness: 0.4 }));
+    body.position.set(0.14, -0.3, 0);
+    const tank = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.05, 0.16, 8), new THREE.MeshStandardMaterial({ color: 0xff8c42, roughness: 0.4 }));
+    tank.rotation.z = Math.PI / 2; tank.position.set(0.02, -0.24, 0);
+    gun.add(body); gun.add(tank);
+    joints.armLR.add(gun);
+    g.userData.gun = gun;
   }
 
-  // Beine: kurze Zylinder, leicht nach aussen gestellt.
-  const legs = [];
-  const legGeo = new THREE.CylinderGeometry(0.035, 0.045, 0.22, 6);
-  for (const [lx, lz] of [[0.18, 0.16], [0.18, -0.16], [-0.18, 0.16], [-0.18, -0.16]]) {
-    const leg = new THREE.Mesh(legGeo, belly);
-    leg.position.set(lx, 0.12, lz);
-    leg.rotation.x = -lz * 1.4;
-    leg.castShadow = true;
-    g.add(leg);
-    legs.push(leg);
-  }
-
-  // Ringelschwanz: Dreiviertel-Torus, hochkant hinter dem Rumpf.
-  const tail = new THREE.Mesh(new THREE.TorusGeometry(0.13, 0.045, 6, 14, Math.PI * 1.6), body);
-  tail.position.set(-0.42, 0.30, 0);
-  tail.rotation.y = Math.PI / 2;
-  tail.rotation.z = Math.PI * 0.9;
-  tail.castShadow = true;
-  g.add(tail);
-
-  // Bodenring: nur fuer Teamkameraden/eigenen Spieler sichtbar (wird gesteuert).
+  // Bodenring: Team-Kennzeichnung (nur fuer Mitspieler derselben Seite sichtbar).
   const ring = new THREE.Mesh(
-    new THREE.RingGeometry(0.34, 0.40, 28),
-    new THREE.MeshBasicMaterial({ color: 0x7ee787, transparent: true, opacity: 0.0, side: THREE.DoubleSide, depthWrite: false }),
+    new THREE.RingGeometry(0.34, 0.42, 28),
+    new THREE.MeshBasicMaterial({ color: 0x7ee787, transparent: true, opacity: 0, side: THREE.DoubleSide, depthWrite: false }),
   );
   ring.rotation.x = -Math.PI / 2;
   ring.position.y = 0.015;
+  ring.userData.hud = true;
   g.add(ring);
 
-  // Markierungsring (Scan-Treffer): rot, pulsierend.
-  const mark = new THREE.Mesh(
-    new THREE.RingGeometry(0.42, 0.50, 28),
-    new THREE.MeshBasicMaterial({ color: 0xff4d4d, transparent: true, opacity: 0.0, side: THREE.DoubleSide, depthWrite: false }),
-  );
-  mark.rotation.x = -Math.PI / 2;
-  mark.position.y = 0.02;
-  g.add(mark);
-
-  g.userData = { mats, legs, tail, head, torso, ring, mark, kind: 'hider' };
+  g.userData = { parts, joints, canvas, texture, material, ring, kind, phase: Math.random() * 6, poseT: 0, pose: 0, gun: g.userData.gun };
   return g;
 }
 
-/** Jaeger: kantiger Mech mit leuchtendem Visier - Chroma-Jaegerdrohne. */
-export function makeSeeker() {
-  const g = new THREE.Group();
-  const shell = std(0x2b2f3a, { metalness: 0.55, roughness: 0.4 });
-  const accent = std(0xff8c42, { emissive: 0xff8c42, emissiveIntensity: 0.9, roughness: 0.4 });
-  const dark = std(0x15171d, { metalness: 0.4, roughness: 0.6 });
-  const mats = [shell];
+// ---------------------------------------------------------------- Posen
+// Gelenkwinkel (Radiant) je Pose. x = seitliches Heben, z = Beugen vor/zurueck.
+// rootY = Hoehe der Huefte ueber dem Boden, rootRot = Neigung des ganzen Koerpers.
+const P = {
+  stand:  { rootY: 0, rootRotZ: 0, head: [0, 0, 0], torso: [0, 0, 0], armUL: [0, 0, 0.08], armUR: [0, 0, -0.08], armLL: [0, 0, 0], armLR: [0, 0, 0], legUL: [0, 0, 0], legUR: [0, 0, 0], legLL: [0, 0, 0], legLR: [0, 0, 0] },
+  crouch: { rootY: -0.62, rootRotZ: 0.35, head: [0, 0, -0.3], torso: [0, 0, 0], armUL: [0, 0, -0.6], armUR: [0, 0, -0.6], armLL: [0, 0, -1.4], armLR: [0, 0, -1.4], legUL: [0, 0, -2.0], legUR: [0, 0, -2.0], legLL: [0, 0, 2.4], legLR: [0, 0, 2.4] },
+  sit:    { rootY: -0.72, rootRotZ: 0, head: [0, 0, 0], torso: [0, 0, 0], armUL: [0, 0, -0.9], armUR: [0, 0, -0.9], armLL: [0, 0, -0.9], armLR: [0, 0, -0.9], legUL: [0, 0, -1.5708], legUR: [0, 0, -1.5708], legLL: [0, 0, 1.5708], legLR: [0, 0, 1.5708] },
+  lie:    { rootY: -0.70, rootRotZ: -1.5708, head: [0, 0, 0.3], torso: [0, 0, 0], armUL: [0, 0, 0.1], armUR: [0, 0, -0.1], armLL: [0, 0, 0], armLR: [0, 0, 0], legUL: [0, 0, 0], legUR: [0, 0, 0], legLL: [0, 0, 0], legLR: [0, 0, 0] },
+  press:  { rootY: 0, rootRotZ: 0, head: [0, 0.6, 0], torso: [0, 0, 0], armUL: [2.6, 0, 0], armUR: [-2.6, 0, 0], armLL: [0.3, 0, 0], armLR: [-0.3, 0, 0], legUL: [0.15, 0, 0], legUR: [-0.15, 0, 0], legLL: [0, 0, 0], legLR: [0, 0, 0] },
+  ball:   { rootY: -0.78, rootRotZ: 0.9, head: [0, 0, -1.0], torso: [0, 0, 0], armUL: [0, 0, -1.6], armUR: [0, 0, -1.6], armLL: [0, 0, -1.8], armLR: [0, 0, -1.8], legUL: [0, 0, -2.4], legUR: [0, 0, -2.4], legLL: [0, 0, 2.6], legLR: [0, 0, 2.6] },
+};
+export const POSE_DEFS = POSES.map((p) => P[p.id]);
 
-  const torso = new THREE.Mesh(new THREE.BoxGeometry(0.62, 0.34, 0.46), shell);
-  torso.position.set(0, 0.40, 0);
-  torso.castShadow = true;
-  g.add(torso);
+/**
+ * Bewegt die Figur: Gehanimation bei Tempo, sonst weich in die Pose.
+ * @param {THREE.Group} g   Figur
+ * @param {number} speed    px/s in der Bodenebene
+ * @param {number} dt
+ * @param {number} pose     Index
+ * @param {boolean} stunned
+ * @param {number} pitch    Blick-Nicken (Kopf folgt leicht)
+ */
+export function animateHumanoid(g, speed, dt, pose = 0, stunned = false, pitch = 0) {
+  const ud = g.userData;
+  const j = ud.joints;
+  ud.phase += dt * (1.5 + speed * 0.05);
+  const moving = speed > 8;
+  const def = moving ? P.stand : (POSE_DEFS[pose] ?? P.stand);
+  const k = Math.min(1, dt * 9);
+  const sw = Math.min(1, speed / 150);
 
-  const plate = new THREE.Mesh(new THREE.BoxGeometry(0.30, 0.10, 0.50), dark);
-  plate.position.set(-0.05, 0.60, 0);
-  g.add(plate);
-
-  const head = new THREE.Mesh(new THREE.BoxGeometry(0.30, 0.24, 0.34), shell);
-  head.position.set(0.40, 0.48, 0);
-  head.castShadow = true;
-  g.add(head);
-
-  const visor = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.08, 0.26), accent);
-  visor.position.set(0.56, 0.50, 0);
-  g.add(visor);
-
-  const antenna = new THREE.Mesh(new THREE.CylinderGeometry(0.015, 0.015, 0.28, 5), dark);
-  antenna.position.set(0.30, 0.74, 0.10);
-  g.add(antenna);
-  const tip = new THREE.Mesh(new THREE.SphereGeometry(0.035, 8, 6), accent);
-  tip.position.set(0.30, 0.89, 0.10);
-  g.add(tip);
-
-  const legs = [];
-  const legGeo = new THREE.BoxGeometry(0.09, 0.26, 0.09);
-  for (const [lx, lz] of [[0.20, 0.20], [0.20, -0.20], [-0.20, 0.20], [-0.20, -0.20]]) {
-    const leg = new THREE.Mesh(legGeo, dark);
-    leg.position.set(lx, 0.14, lz);
-    leg.castShadow = true;
-    g.add(leg);
-    legs.push(leg);
+  const target = (key, axis) => {
+    const base = def[key]?.[axis] ?? 0;
+    if (!moving) return base;
+    // Gehen: Arme und Beine gegenlaeufig schwingen
+    const s = Math.sin(ud.phase * 2.2) * 0.7 * sw;
+    if (axis !== 2) return base;
+    if (key === 'legUL') return s; if (key === 'legUR') return -s;
+    if (key === 'legLL') return Math.max(0, -s) * 1.1; if (key === 'legLR') return Math.max(0, s) * 1.1;
+    if (key === 'armUL') return -s * 0.8; if (key === 'armUR') return s * 0.8;
+    if (key === 'armLL' || key === 'armLR') return -0.35;
+    return base;
+  };
+  for (const key of Object.keys(j)) {
+    const r = j[key].rotation;
+    r.x += (target(key, 0) - r.x) * k;
+    r.y += (target(key, 1) - r.y) * k;
+    r.z += (target(key, 2) - r.z) * k;
   }
-
-  // Glimmendes Bodenlicht, damit Jaeger von weitem erkennbar sind.
-  const glow = new THREE.Mesh(
-    new THREE.CircleGeometry(0.55, 24),
-    new THREE.MeshBasicMaterial({ color: 0xff8c42, transparent: true, opacity: 0.18, depthWrite: false }),
-  );
-  glow.rotation.x = -Math.PI / 2;
-  glow.position.y = 0.012;
-  g.add(glow);
-
-  const ring = new THREE.Mesh(
-    new THREE.RingGeometry(0.34, 0.40, 28),
-    new THREE.MeshBasicMaterial({ color: 0xff8c42, transparent: true, opacity: 0.0, side: THREE.DoubleSide, depthWrite: false }),
-  );
-  ring.rotation.x = -Math.PI / 2;
-  ring.position.y = 0.015;
-  g.add(ring);
-
-  g.userData = { mats, legs, head, torso, tail: null, ring, mark: null, visor, kind: 'seeker' };
-  return g;
+  // Kopf nickt leicht mit dem Blick
+  j.head.rotation.z += ((-pitch * 0.5) - j.head.rotation.z) * k * 0.5;
+  // Gesamtkoerper: Hoehe und Neigung der Pose, Wippen beim Gehen, Wackeln bei Betaeubung
+  const bob = moving ? Math.abs(Math.sin(ud.phase * 2.2)) * 0.035 * sw : 0;
+  const rootY = (def.rootY ?? 0) + bob;
+  const rootRotZ = def.rootRotZ ?? 0;
+  const body = ud.body;
+  body.position.y += (rootY - body.position.y) * k;
+  body.rotation.z += (rootRotZ - body.rotation.z) * k;
+  g.rotation.z = stunned ? Math.sin(ud.phase * 6) * 0.12 : 0;
 }
 
-/** Saeule mit leuchtendem Ankerring fuer den Zungenhaken. */
+/**
+ * Hilfsobjekt fuer die Figurenerstellung: Alle Gelenke haengen an einer
+ * "body"-Gruppe, damit Posen den ganzen Koerper heben/neigen koennen.
+ */
+export function makeFigure(kind) {
+  const outer = new THREE.Group();
+  const g = makeHumanoid(kind);
+  // Ring bleibt aussen (unbeeinflusst von Pose)
+  const ring = g.userData.ring;
+  g.remove(ring);
+  outer.add(ring);
+  outer.add(g);
+  outer.userData = { ...g.userData, body: g, ring };
+  return outer;
+}
+
+// ---------------------------------------------------------------- Saeule
 export function makePillar() {
   const g = new THREE.Group();
-  const stone = std(0x3a4050, { roughness: 0.85 });
-  const col = new THREE.Mesh(new THREE.CylinderGeometry(0.34, 0.42, 2.1, 10), stone);
-  col.position.y = 1.05;
-  col.castShadow = true;
-  col.receiveShadow = true;
+  const stone = new THREE.MeshStandardMaterial({ color: 0x3a4050, roughness: 0.85 });
+  const col = new THREE.Mesh(new THREE.CylinderGeometry(0.34, 0.42, 2.5, 10), stone);
+  col.position.y = 1.25;
+  col.castShadow = true; col.receiveShadow = true;
   g.add(col);
-  const cap = new THREE.Mesh(new THREE.CylinderGeometry(0.44, 0.36, 0.18, 10), stone);
-  cap.position.y = 2.15;
+  const cap = new THREE.Mesh(new THREE.CylinderGeometry(0.46, 0.38, 0.2, 10), stone);
+  cap.position.y = 2.55;
   cap.castShadow = true;
   g.add(cap);
-  const ring = new THREE.Mesh(
-    new THREE.TorusGeometry(0.40, 0.045, 8, 24),
-    new THREE.MeshStandardMaterial({ color: 0xf0b429, emissive: 0xf0b429, emissiveIntensity: 0.8, roughness: 0.4 }),
-  );
-  ring.rotation.x = Math.PI / 2;
-  ring.position.y = 1.5;
-  g.add(ring);
-  g.userData = { ring };
+  g.userData = { color: [58, 64, 80] };
   return g;
-}
-
-/** Zunge: duenner Zylinder zwischen zwei Punkten, wird pro Frame skaliert. */
-export function makeTongue(color = 0xff7aa2) {
-  const geo = new THREE.CylinderGeometry(0.035, 0.035, 1, 6);
-  geo.translate(0, 0.5, 0);           // Ursprung am Anfang, Laenge = scale.y
-  const mesh = new THREE.Mesh(geo, std(color, { roughness: 0.5 }));
-  const tip = new THREE.Mesh(new THREE.SphereGeometry(0.07, 8, 6), std(color, { roughness: 0.5 }));
-  const g = new THREE.Group();
-  g.add(mesh); g.add(tip);
-  g.userData = { mesh, tip };
-  return g;
-}
-
-/** Richtet eine Zunge von a nach b aus. */
-export function aimTongue(g, a, b) {
-  const dir = new THREE.Vector3().subVectors(b, a);
-  const len = dir.length();
-  g.position.copy(a);
-  g.userData.mesh.scale.set(1, Math.max(0.001, len), 1);
-  g.userData.mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir.normalize());
-  g.userData.tip.position.copy(b).sub(a);
 }
 
 export const GEO = {
-  wall: new THREE.BoxGeometry(1, 1.4, 1),
+  wall: new THREE.BoxGeometry(1, 1, 1),
   bush: new THREE.IcosahedronGeometry(0.52, 1),
   water: new THREE.PlaneGeometry(1, 1),
   splat: new THREE.CircleGeometry(0.28, 12),
-  particle: new THREE.SphereGeometry(0.06, 6, 5),
+  particle: new THREE.SphereGeometry(0.05, 6, 5),
+  decal: new THREE.CircleGeometry(0.16, 10),
 };
