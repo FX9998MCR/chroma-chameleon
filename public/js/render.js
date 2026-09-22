@@ -14,9 +14,11 @@ export class Renderer {
   constructor(container, labelsEl) {
     this.container = container;
     this.labelsEl = labelsEl;
-    this.renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-    this.renderer.shadowMap.enabled = true;
+    // Leistungsmodus: per URL (?lowfx) oder Einstellung - fuer schwache Rechner.
+    this.lowFx = new URLSearchParams(location.search).has('lowfx') || localStorage.getItem('cc-lowfx') === '1';
+    this.renderer = new THREE.WebGLRenderer({ antialias: !this.lowFx, powerPreference: 'high-performance' });
+    this.renderer.setPixelRatio(this.lowFx ? 1 : Math.min(window.devicePixelRatio, 2));
+    this.renderer.shadowMap.enabled = !this.lowFx;
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
     this.renderer.toneMappingExposure = 1.05;
@@ -28,7 +30,8 @@ export class Renderer {
 
     this.camera = new THREE.PerspectiveCamera(48, 1, 0.1, 120);
     this.camTarget = new THREE.Vector3();
-    this.camOffset = new THREE.Vector3(0, 15.5, 9.5);
+    // Steil von oben, damit Mauern die eigene Figur moeglichst nie verdecken.
+    this.camOffset = new THREE.Vector3(0, 17.5, 6.5);
 
     this.scene.add(new THREE.HemisphereLight(0xcfe8ff, 0x22301f, 0.75));
     this.sun = new THREE.DirectionalLight(0xfff1d6, 1.6);
@@ -66,6 +69,15 @@ export class Renderer {
 
     this.resize();
     window.addEventListener('resize', () => this.resize());
+  }
+
+  setLowFx(on) {
+    this.lowFx = on;
+    this.renderer.setPixelRatio(on ? 1 : Math.min(window.devicePixelRatio, 2));
+    this.renderer.shadowMap.enabled = !on;
+    // Materialien muessen neu kompiliert werden, damit der Schattenwechsel greift.
+    this.scene.traverse((o) => { if (o.isMesh && o.material) o.material.needsUpdate = true; });
+    this.resize();
   }
 
   resize() {
@@ -290,10 +302,14 @@ export class Renderer {
       g.rotation.y += angleDiff(g.rotation.y, targetRot) * Math.min(1, dt * 14);
       this.animate(g, f.me.speed ?? 0, dt, f.me.stun > 0);
       // Eigene Sichtbarkeit als Feedback: getarnt = durchscheinend.
-      const selfAlpha = f.me.role === C.ROLE_HIDER ? 0.3 + 0.7 * f.me.vis : 1;
+      const selfAlpha = f.me.role === C.ROLE_HIDER ? 0.45 + 0.55 * f.me.vis : 1;
       this.setOpacity(g, f.me.alive ? selfAlpha : 0);
-      g.userData.ring.material.opacity = 0.75;
-      g.userData.ring.material.color.set(f.me.role === C.ROLE_SEEKER ? 0xff8c42 : 0x7ee787);
+      // Eigener Ring immer sichtbar - auch wenn eine Mauer davor steht.
+      const ring = g.userData.ring;
+      ring.material.opacity = 0.85;
+      ring.material.depthTest = false;
+      ring.renderOrder = 999;
+      ring.material.color.set(f.me.role === C.ROLE_SEEKER ? 0xff8c42 : 0x7ee787);
       if (g.userData.mark) g.userData.mark.material.opacity = f.me.mark > 0 ? 0.5 + Math.sin(this.clock * 12) * 0.4 : 0;
       // Haken-Zunge
       this.updateTongue('me', f.me.grapple, g.position, f.me.aim);

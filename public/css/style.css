@@ -51,6 +51,8 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 .joinrow button { flex: 0 0 auto; }
 .error { color: var(--danger); margin: 8px 0 0; font-size: 14px; }
 .small { color: var(--muted); font-size: 13px; }
+.check { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--muted); margin-top: 10px; cursor: pointer; }
+.check input { width: auto; }
 .help { margin-top: 16px; border-top: 1px solid var(--line); padding-top: 10px; }
 .help summary { cursor: pointer; color: var(--muted); }
 .help-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 12px; }

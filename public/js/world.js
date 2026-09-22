@@ -83,7 +83,7 @@ export function buildWorld(scene, map) {
     const tx = i % map.w, ty = (i / map.w) | 0;
     // Aussenmauer etwas hoeher, Innenmauern variieren leicht.
     const edge = tx < 2 || ty < 2 || tx >= map.w - 2 || ty >= map.h - 2;
-    const h = edge ? 1.35 : 0.85 + rng() * 0.25;
+    const h = edge ? 1.35 : 0.62 + rng() * 0.22;
     m4.makeScale(1, h, 1);
     m4.setPosition(tx + 0.5, 0.7 * h, ty + 0.5);
     walls.setMatrixAt(n, m4);

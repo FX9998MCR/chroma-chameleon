@@ -17,6 +17,7 @@ const ui = {
   lobbyCode: $('lobby-code'), invite: $('invite'), btnCopy: $('btn-copy'), lobbyPlayers: $('lobby-players'),
   lobbyHint: $('lobby-hint'), btnReady: $('btn-ready'), btnStart: $('btn-start'), btnLeave: $('btn-leave'),
   disconnected: $('disconnected'), discReason: $('disc-reason'), btnReload: $('btn-reload'), chatInput: $('chat-input'),
+  lowfx: $('lowfx'),
 };
 
 const renderer = new Renderer($('game'), $('labels'));
@@ -42,6 +43,8 @@ const S = {
 
 // ---------------------------------------------------------------- Menue
 ui.name.value = localStorage.getItem('cc-name') ?? '';
+ui.lowfx.checked = localStorage.getItem('cc-lowfx') === '1';
+ui.lowfx.onchange = () => { localStorage.setItem('cc-lowfx', ui.lowfx.checked ? '1' : '0'); renderer.setLowFx(ui.lowfx.checked); };
 const urlRoom = new URLSearchParams(location.search).get('raum');
 if (urlRoom) ui.code.value = urlRoom.toUpperCase().slice(0, C.ROOM_CODE_LEN);
 
@@ -277,6 +280,40 @@ input.onKey = (e, down) => {
   return true;
 };
 
+// ---------------------------------------------------------------- Zielrichtung
+/** Zielwinkel und Kamera-Vorlauf aus der Mausposition. */
+function computeAim() {
+  let aim = S.pred?.aim ?? 0;
+  let lean = { x: 0, y: 0 };
+  if (!S.pred) return { aim, lean };
+  const w = renderer.screenToWorld(input.mouse.x, input.mouse.y);
+  if (w) {
+    const dx = w.x - S.pred.x, dy = w.y - S.pred.y;
+    if (Math.hypot(dx, dy) > 4) aim = Math.atan2(dy, dx);
+    const d = Math.min(1, Math.hypot(dx, dy) / 600);
+    lean = { x: dx * 0.22 * d, y: dy * 0.22 * d };
+  }
+  S.pred.aim = aim;
+  return { aim, lean };
+}
+
+// ---------------------------------------------------------------- Eingabeversand
+// Eigener Takt, unabhaengig vom Rendern: auch bei niedriger Bildrate kommen
+// Eingaben puenktlich beim Server an.
+function sendInput() {
+  if (!S.inGame || !S.pred || !net) return;
+  const { aim } = computeAim();
+  const a = input.takeActions();
+  const anyAction = Object.values(a).some(Boolean);
+  const chatOpen = document.activeElement === ui.chatInput;
+  net.send({
+    t: 'input', seq: ++S.seq, aim,
+    k: chatOpen ? { up: false, down: false, left: false, right: false, sprint: false, absorb: false } : input.keys,
+    a: anyAction && !chatOpen ? a : undefined,
+  });
+}
+setInterval(sendInput, 1000 / C.INPUT_RATE);
+
 // ---------------------------------------------------------------- Schleife
 let last = performance.now();
 function frame(now) {
@@ -285,17 +322,7 @@ function frame(now) {
   last = now;
 
   if (S.inGame && S.pred && S.you && S.map) {
-    // Zielrichtung aus Mausposition
-    const w = renderer.screenToWorld(input.mouse.x, input.mouse.y);
-    let aim = S.pred.aim ?? 0;
-    let lean = { x: 0, y: 0 };
-    if (w) {
-      const dx = w.x - S.pred.x, dy = w.y - S.pred.y;
-      if (Math.hypot(dx, dy) > 4) aim = Math.atan2(dy, dx);
-      const d = Math.min(1, Math.hypot(dx, dy) / 600);
-      lean = { x: dx * 0.22 * d, y: dy * 0.22 * d };
-    }
-    S.pred.aim = aim;
+    const { aim, lean } = computeAim();
 
     // Vorhersage der eigenen Bewegung
     const y = S.you;
@@ -307,19 +334,6 @@ function frame(now) {
       S.pred.x += (y.x - S.pred.x) * Math.min(1, dt * 12);
       S.pred.y += (y.y - S.pred.y) * Math.min(1, dt * 12);
       S.pred.vx = 0; S.pred.vy = 0;
-    }
-
-    // Eingaben senden (30 Hz)
-    if (now - S.lastSend >= 1000 / C.INPUT_RATE) {
-      S.lastSend = now;
-      const a = input.takeActions();
-      const anyAction = Object.values(a).some(Boolean);
-      const chatOpen = document.activeElement === ui.chatInput;
-      net?.send({
-        t: 'input', seq: ++S.seq, aim,
-        k: chatOpen ? { up: false, down: false, left: false, right: false, sprint: false, absorb: false } : input.keys,
-        a: anyAction && !chatOpen ? a : undefined,
-      });
     }
 
     renderer.update({
@@ -340,3 +354,6 @@ requestAnimationFrame(frame);
 // Bei Fokusverlust Eingaben loeschen, damit niemand "weiterlaeuft".
 window.addEventListener('blur', () => input.reset());
 document.addEventListener('visibilitychange', () => { if (document.hidden) input.reset(); });
+
+// Fuer automatisierte Browsertests und Fehlersuche in der Konsole.
+window.__cc = { S, renderer, hud, input, get net() { return net; } };
