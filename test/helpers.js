@@ -18,6 +18,23 @@ export function makeGame(seed = 11, names = ['Anna', 'Ben', 'Cem']) {
 export function ticks(g, n) { for (let i = 0; i < n; i++) g.update(DT); }
 export function seconds(g, s) { ticks(g, Math.ceil(s / DT)); }
 
+/**
+ * Findet eine waagerechte Strecke aus n freien Bodenkacheln (mit freier Zeile
+ * darueber und darunter). Liefert die linke Kachel.
+ */
+export function openRun(map, n) {
+  for (let ty = 3; ty < C.MAP_H - 3; ty++) {
+    for (let tx = 3; tx < C.MAP_W - 3 - n; tx++) {
+      let ok = true;
+      for (let k = 0; k < n && ok; k++) for (let dy = -1; dy <= 1; dy++) {
+        if (map.tiles[idx(tx + k, ty + dy)] !== C.T_FLOOR) { ok = false; break; }
+      }
+      if (ok) return { tx, ty, x: tx * C.TILE + C.TILE / 2, y: ty * C.TILE + C.TILE / 2 };
+    }
+  }
+  throw new Error('keine freie Strecke');
+}
+
 /** Findet eine Bodenkachel, deren 3x3-Umgebung komplett Boden ist. */
 export function openSpot(map, minTx = 3, minTy = 3) {
   for (let ty = minTy; ty < C.MAP_H - 3; ty++) {
@@ -53,8 +70,15 @@ export function wallWithFloorSides(map) {
 
 export function place(p, x, y) { p.x = x; p.y = y; p.vx = 0; p.vy = 0; }
 
-export function input(g, id, keys = {}, actions = null, aim = 0) {
-  g.setInput(id, { up: false, down: false, left: false, right: false, sprint: false, absorb: false, ...keys }, actions, aim, 0);
+export function input(g, id, keys = {}, actions = null, yaw = 0, pitch = 0) {
+  g.setInput(id, { up: false, down: false, left: false, right: false, sprint: false, paint: false, ...keys }, actions, { yaw, pitch }, 0);
+}
+
+/** Blickwinkel von a auf Koerpermitte von b (fuer Schuss-Tests). */
+export function aimAt(a, b, targetH = 0.9) {
+  const dx = (b.x - a.x) / C.TILE, dy = (b.y - a.y) / C.TILE;
+  const dist = Math.hypot(dx, dy);
+  return { yaw: Math.atan2(dy, dx), pitch: Math.atan2(targetH - C.EYE_H, dist) };
 }
 
 /** Runde starten und die Vorbereitung ueberspringen. */

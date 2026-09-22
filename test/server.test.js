@@ -68,6 +68,43 @@ test('Raum erstellen, beitreten, Karte erhalten', async () => {
   assert.equal(rooms.size, 0, 'leerer Raum wird entfernt');
 });
 
+test('Bemalung wird weitergereicht, geprueft und Neuankoemmlingen nachgeliefert', async () => {
+  const a = await connect();
+  a.send({ t: 'join', mode: 'create', name: 'Maler', protocol: C.PROTOCOL_VERSION });
+  const wa = await a.next((m) => m.t === 'welcome');
+  const b = await connect();
+  b.send({ t: 'join', mode: 'join', room: wa.room, name: 'Zuschauer', protocol: C.PROTOCOL_VERSION });
+  const wb = await b.next((m) => m.t === 'welcome');
+
+  a.send({ t: 'paint', paint: { fill: [10, 20, 30] }, avg: [10, 20, 30] });
+  const p1 = await b.next((m) => m.t === 'paint');
+  assert.equal(p1.id, wa.id);
+  assert.deepEqual(p1.paint, { fill: [10, 20, 30] });
+
+  const png = 'data:image/png;base64,' + 'iVBORw0KGgo='.repeat(4);
+  a.send({ t: 'paint', paint: { png } });
+  const p2 = await b.next((m) => m.t === 'paint');
+  assert.equal(p2.paint.png, png);
+
+  // Ungueltiges wird verworfen: kein weiteres paint bei b
+  a.send({ t: 'paint', paint: { png: 'data:text/html;base64,AAAA' } });
+  a.send({ t: 'paint', paint: { fill: [1, 2] } });
+  a.send({ t: 'paint', paint: 'x' });
+  a.send({ t: 'ping', ts: 42 });
+  await a.next((m) => m.t === 'pong' && m.ts === 42);
+  await new Promise((r) => setTimeout(r, 80));
+  await assert.rejects(b.next((m) => m.t === 'paint', 150), /Zeitueberschreitung/);
+
+  // Dritter kommt spaeter: bekommt den Stand per paintall
+  const c = await connect();
+  c.send({ t: 'join', mode: 'join', room: wa.room, name: 'Spaet', protocol: C.PROTOCOL_VERSION });
+  await c.next((m) => m.t === 'welcome');
+  const all = await c.next((m) => m.t === 'paintall');
+  assert.deepEqual(all.items, [{ id: wa.id, paint: { png } }]);
+  a.ws.close(); b.ws.close(); c.ws.close();
+  void wb;
+});
+
 test('falsche Protokollversion und unbekannter Raum werden abgewiesen', async () => {
   const a = await connect();
   a.send({ t: 'join', mode: 'create', name: 'X', protocol: -1 });
