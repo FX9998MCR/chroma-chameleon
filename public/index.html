@@ -4,8 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
 <title>Chroma Chameleon</title>
-<meta name="description" content="Online-Multiplayer-Versteckspiel: Chamäleons tarnen sich per Farbe und Stillstand, Jäger suchen sie mit Puls-Scans.">
-<meta name="theme-color" content="#0d1117">
+<meta name="description" content="Online-Multiplayer-Versteckspiel: Chamäleons tarnen sich per Farbe und Stillstand, Sucher markieren sie mit dem Farbmarkierer.">
+<meta name="theme-color" content="#0b0f14">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Ccircle cx='32' cy='32' r='30' fill='%235c8056'/%3E%3Ccircle cx='24' cy='26' r='7' fill='%23fff'/%3E%3Ccircle cx='26' cy='27' r='3' fill='%23111'/%3E%3Cpath d='M40 40q10 4 6 14' stroke='%23e8c66a' stroke-width='5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E">
 <link rel="stylesheet" href="/css/style.css">
 <script type="importmap">
@@ -34,12 +34,14 @@
   }
   window.__fatal = fatal;
   window.addEventListener('error', function (e) {
+    if (window.__booted) { console.error(e.error || e.reason || e.message); return; }
     var m = e.message || 'Unbekannter Fehler';
     if (e.filename) m += '\n(' + e.filename.replace(location.origin, '') + ':' + (e.lineno || 0) + ')';
     if (/importmap|Failed to resolve module|three/i.test(m)) m += '\nVermutlich fehlt der Ordner node_modules: bitte "npm install" im Spielordner ausführen.';
     fatal(m);
   });
   window.addEventListener('unhandledrejection', function (e) {
+    if (window.__booted) { console.error(e.error || e.reason || e.message); return; }
     var r = e.reason;
     fatal((r && (r.stack || r.message)) || String(r));
   });
@@ -55,14 +57,15 @@
 </script>
 <div id="game"></div>
 <div id="labels"></div>
+<div id="vignette" aria-hidden="true"></div>
 <div id="crosshair" hidden></div>
 <div id="lockhint" hidden>Klicken, um dich umzuschauen · <kbd>Esc</kbd> gibt die Maus frei</div>
 
 <!-- Malmodus -->
 <aside id="paint-panel" hidden>
-  <h3>🎨 Malmodus</h3>
+  <h3><span class="ico">🎨</span> Malmodus</h3>
   <div class="row"><div id="paint-swatch" class="swatch"></div>
-    <button id="paint-eye" class="mini" title="Leertaste">Pipette</button></div>
+    <button id="paint-eye" class="mini" title="Leertaste">💧 Pipette</button></div>
   <p class="small">Cursor auf Wand/Boden/Objekt halten und <kbd>Leertaste</kbd> drücken – oder „Pipette" klicken.</p>
   <label>Helligkeit <input id="paint-light" type="range" min="-60" max="60" value="0"></label>
   <label>Pinsel <input id="paint-size" type="range" min="3" max="40" value="12"> <span id="paint-size-val">12</span></label>
@@ -74,35 +77,63 @@
   </div>
   <p class="small">Linke Maustaste: auf den Körper malen · Rechte Maustaste: um dich drehen · Mausrad: Pinselgröße</p>
   <p id="paint-hint" class="small hint"></p>
-  <button id="paint-done" class="primary">Fertig (F)</button>
+  <button id="paint-done" class="primary">Fertig <kbd>F</kbd></button>
 </aside>
 
 <!-- Hauptmenue -->
 <section id="menu" class="overlay">
+  <div class="menu-bg" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></div>
   <div class="panel">
-    <h1><span class="logo"></span>Chroma Chameleon</h1>
-    <p class="tag">Mal dich an. Nimm eine Pose ein. Werde nicht gefunden.</p>
+    <header class="brand">
+      <span class="logo" aria-hidden="true">
+        <svg viewBox="0 0 64 64" width="52" height="52">
+          <defs>
+            <linearGradient id="lg-body" x1="0" y1="0" x2="1" y2="1">
+              <stop offset="0" stop-color="#b9f0b0"/><stop offset=".45" stop-color="#5fb8a8"/><stop offset="1" stop-color="#8a6fc4"/>
+            </linearGradient>
+          </defs>
+          <path d="M8 38c0-14 11-24 25-24 12 0 21 7 23 17 1 5-3 8-8 8H30c-4 0-6 3-6 6 0 5 5 7 9 5 2-1 4 0 4 2 0 3-4 6-10 6C15 58 8 50 8 38z" fill="url(#lg-body)"/>
+          <circle cx="40" cy="27" r="7.5" fill="#fff"/><circle cx="41.5" cy="27.5" r="3.6" fill="#10151c"/>
+          <path d="M20 30c3-4 7-6 11-6" stroke="rgba(255,255,255,.55)" stroke-width="3" fill="none" stroke-linecap="round"/>
+        </svg>
+      </span>
+      <div>
+        <h1><span class="chroma">Chroma</span> Chameleon</h1>
+        <p class="tag">Mal dich an. Nimm eine Pose ein. Werde nicht gefunden.</p>
+      </div>
+    </header>
     <label class="field">
       <span>Dein Name</span>
       <input id="name" maxlength="16" autocomplete="off" spellcheck="false" placeholder="Chamäleon">
     </label>
     <div class="buttons">
-      <button id="btn-quick" class="primary">Schnellspiel</button>
-      <button id="btn-create">Privaten Raum erstellen</button>
+      <button id="btn-quick" class="primary big">▶ Schnellspiel</button>
     </div>
     <div class="buttons">
       <button id="btn-solo">🤖 Solo-Training mit 3 Bots</button>
+      <button id="btn-create">🔒 Privaten Raum erstellen</button>
     </div>
     <div class="joinrow">
       <input id="code" maxlength="4" autocomplete="off" spellcheck="false" placeholder="RAUMCODE">
       <button id="btn-join">Beitreten</button>
     </div>
     <p id="menu-error" class="error" hidden></p>
-    <label class="check"><input type="checkbox" id="lowfx"> Leistungsmodus (keine Schatten, für schwache Rechner)</label>
+    <details class="settings">
+      <summary>⚙️ Einstellungen</summary>
+      <div class="settings-body">
+        <label class="range">
+          <span>Maus-Empfindlichkeit</span>
+          <input type="range" id="sens" min="0.2" max="3" step="0.05" value="1" oninput="this.nextElementSibling.value = Number(this.value).toFixed(2) + '×'">
+          <output id="sens-val" for="sens">1.00×</output>
+        </label>
+        <label class="check"><input type="checkbox" id="invert-y"> Maus Y invertieren</label>
+        <label class="check"><input type="checkbox" id="lowfx"> Leistungsmodus (keine Schatten, für schwache Rechner)</label>
+      </div>
+    </details>
     <details class="help">
-      <summary>So wird gespielt</summary>
+      <summary>❔ So wird gespielt</summary>
       <div class="help-grid">
-        <div>
+        <div class="help-card hider">
           <h3>Chamäleon</h3>
           <ul>
             <li><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> laufen · Maus schaut · <kbd>Shift</kbd> sprinten</li>
@@ -112,7 +143,7 @@
             <li>Du startest <b>weiß</b>. Erst die Bemalung macht dich unsichtbar – und nur, wenn du stillhältst.</li>
           </ul>
         </div>
-        <div>
+        <div class="help-card seeker">
           <h3>Sucher</h3>
           <ul>
             <li><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> laufen · Maus schaut · <kbd>Shift</kbd> Dash</li>
@@ -123,7 +154,7 @@
         </div>
       </div>
       <p class="small">Allein? <b>Solo-Training</b> startet sofort mit KI-Mitspielern; in jeder Lobby kann der Host Bots hinzufügen.</p>
-      <p class="small">Runde: 15 s Verstecken & Anmalen (Sucher sind blind), dann 150 s Suche. 2 – 24 Spieler. Bei 2 – 4 Spielern ein Sucher, bei 5 – 8 zwei, usw.</p>
+      <p class="small">Runde: 15 s Verstecken &amp; Anmalen (Sucher sind blind), dann 150 s Suche. 2 – 24 Spieler. Bei 2 – 4 Spielern ein Sucher, bei 5 – 8 zwei, usw.</p>
     </details>
   </div>
 </section>
@@ -131,8 +162,11 @@
 <!-- Lobby -->
 <section id="lobby" class="overlay" hidden>
   <div class="panel">
-    <h2>Raum <span id="lobby-code" title="Klicken zum Kopieren">----</span></h2>
-    <p class="small">Einladungslink: <a id="invite" href="#" target="_blank" rel="noopener"></a> <button id="btn-copy" class="mini">kopieren</button></p>
+    <div class="lobby-head">
+      <h2>Raum <span id="lobby-code" title="Klicken zum Kopieren">----</span></h2>
+      <button id="btn-copy" class="mini">🔗 Link kopieren</button>
+    </div>
+    <p class="small invite-row">Einladungslink: <a id="invite" href="#" target="_blank" rel="noopener"></a></p>
     <ul id="lobby-players"></ul>
     <p id="lobby-hint" class="small"></p>
     <div class="buttons botrow" id="botrow" hidden>
@@ -166,6 +200,7 @@
   <div id="feed"></div>
   <div id="prep-blind" hidden>
     <div class="blind-inner">
+      <div class="blind-eye" aria-hidden="true">🙈</div>
       <h2>Augen zu …</h2>
       <p>Die Chamäleons verstecken sich und malen sich an.</p>
       <div id="blind-count">15</div>
@@ -176,9 +211,11 @@
     <p>Du wirst in <span id="caught-count">3</span> s Sucher.</p>
   </div>
   <div id="scoreboard" hidden>
+    <h3 class="board-title">Punktetafel</h3>
     <table><thead><tr><th>#</th><th>Name</th><th>Rolle</th><th>Runde</th><th>Gesamt</th></tr></thead><tbody></tbody></table>
   </div>
   <div id="roundend" hidden>
+    <div class="roundend-badge" aria-hidden="true"></div>
     <h2 id="roundend-title"></h2>
     <p id="roundend-sub"></p>
     <table><thead><tr><th>#</th><th>Name</th><th>Rolle</th><th>Runde</th><th>Gesamt</th></tr></thead><tbody></tbody></table>

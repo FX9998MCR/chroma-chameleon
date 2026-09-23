@@ -55,6 +55,9 @@ export class Hud {
     const role = me.role;
     this.el.role.textContent = role === C.ROLE_SEEKER ? 'Sucher' : 'Chamäleon';
     this.el.role.className = role;
+    // Rolle und Phase als Attribute: die Optik (style.css) kann sich danach richten
+    if (this.el.hud.dataset.role !== role) this.el.hud.dataset.role = role;
+    if (this.el.hud.dataset.phase !== st.phase) this.el.hud.dataset.phase = st.phase;
     this.buildAbilities(role);
 
     const t = Math.ceil(st.timeLeft);
@@ -149,6 +152,8 @@ export class Hud {
     this.el.roundendTitle.textContent = hidersWon ? 'Die Chamäleons bleiben unentdeckt!' : 'Die Sucher haben alle gefunden!';
     this.el.roundendTitle.className = ev.winner;
     const iWon = myRole === ev.winner;
+    this.el.roundend.classList.toggle('won', iWon);
+    this.el.roundend.classList.toggle('lost', !iWon);
     this.el.roundendSub.textContent = (iWon ? 'Sieg! ' : 'Niederlage. ') + (ev.survivors.length ? `Unentdeckt: ${ev.survivors.join(', ')}` : 'Niemand blieb unentdeckt.');
     this.fillTable(this.el.roundend.querySelector('tbody'), ev.scores, this.meId);
     this.el.roundend.hidden = false;

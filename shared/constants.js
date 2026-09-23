@@ -93,7 +93,7 @@ export const DECOY_MAX_PER_PLAYER = 1;
 // --- Farbmarkierer (Jaeger) ------------------------------------------------
 export const SHOT_RANGE = 16;            // Kacheln
 export const SHOT_COOLDOWN = 1.0;
-export const SHOT_SPREAD = 0.012;        // Radiant, leichte Streuung
+export const SHOT_SPREAD = 0.005;        // Radiant, leichte Streuung (0,5 Grad)
 
 // --- Sprint-Dash (Jaeger) --------------------------------------------------
 export const DASH_COOLDOWN = 7.0;

@@ -6,8 +6,16 @@
 import * as C from '../shared/constants.js';
 import { isSolidAt, TILE_PX } from '../shared/map.js';
 import {
-  angleDiff, stepMovement, raycast3D, rayHitsCylinder, dirFromAngles, slideMove, raycastSolid,
+  angleDiff, stepMovement, raycast3D, rayHitsBody, circleHitsSolid, dirFromAngles, slideMove, raycastSolid,
 } from '../shared/physics.js';
+
+// Wie weit der Server Ziele beim Schuss hoechstens zurueckspult (Sekunden).
+const MAX_REWIND = 0.4;
+// Wie weit die Zielrichtung des Clients hoechstens von seiner Blickrichtung abweichen darf.
+// Die Kamera sitzt hinter der Schulter und neigt sich an Mauern steiler nach unten,
+// deshalb gibt es echte Unterschiede - vor allem im Nickwinkel.
+const MAX_AIM_YAW_DEV = 1.2;
+const MAX_AIM_PITCH_DEV = 1.5;
 
 const EMPTY_INPUT = Object.freeze({
   up: false, down: false, left: false, right: false, sprint: false, paint: false,
@@ -24,6 +32,7 @@ export function makePlayer(id, name) {
     x: 0, y: 0, vx: 0, vy: 0,
     yaw: 0, pitch: 0,              // Blickrichtung (Kamera)
     pose: 0,                       // Index in POSES
+    poseYaw: 0,                    // Ausrichtung des Koerpers, solange eine Pose gehalten wird
     painting: false,               // Malmodus aktiv (eingefroren)
     paint: null,                   // letzte Bemalung: {png} oder {fill:[r,g,b]} oder null = weiss
     avgColor: [245, 245, 245],     // Durchschnittsfarbe der Bemalung (fuer Bots)
@@ -45,6 +54,8 @@ export function makePlayer(id, name) {
     ready: false,
     input: { ...EMPTY_INPUT },
     actions: { primary: false, decoy: false, dash: false, pose: false },
+    aim: null,                     // Zielrichtung des naechsten Schusses {yaw, pitch, lag}
+    hist: [],                      // Positionsverlauf fuer den Lag-Ausgleich [{t, x, y, pose, yaw}]
     seq: 0,
   };
 }
@@ -90,7 +101,7 @@ export class Game {
     }
   }
 
-  setInput(id, inp, actions, look, seq) {
+  setInput(id, inp, actions, look, seq, aim) {
     const p = this.players.get(id);
     if (!p) return;
     p.input = {
@@ -103,6 +114,39 @@ export class Game {
     }
     if (Number.isFinite(seq)) p.seq = seq;
     if (actions) for (const k of Object.keys(p.actions)) if (actions[k]) p.actions[k] = true;
+    // Zielrichtung: Der Client rechnet aus, wohin das Fadenkreuz zeigt, und schickt die
+    // Richtung von der Augenhoehe der Figur zu diesem Punkt. Nur plausible Werte zaehlen.
+    if (actions?.primary && aim && Number.isFinite(aim.yaw) && Number.isFinite(aim.pitch)) {
+      const okYaw = Math.abs(angleDiff(p.yaw, aim.yaw)) <= MAX_AIM_YAW_DEV;
+      const okPitch = Math.abs(aim.pitch - p.pitch) <= MAX_AIM_PITCH_DEV;
+      const lag = Number.isFinite(aim.lag) ? Math.max(0, Math.min(MAX_REWIND, aim.lag / 1000)) : 0;
+      p.aim = okYaw && okPitch ? { yaw: aim.yaw, pitch: Math.max(-1.5, Math.min(1.5, aim.pitch)), lag } : { yaw: p.yaw, pitch: p.pitch, lag };
+    }
+  }
+
+  /** Position eines Spielers vor `ago` Sekunden (linear zwischen gespeicherten Takten). */
+  positionAt(p, ago) {
+    const h = p.hist;
+    const cur = { x: p.x, y: p.y, pose: p.pose, yaw: p.pose ? p.poseYaw : p.yaw };
+    if (ago <= 0 || h.length === 0) return cur;
+    const t = this.time - ago;
+    if (t >= h[h.length - 1].t) return cur;
+    for (let i = h.length - 1; i > 0; i--) {
+      const a = h[i - 1], b = h[i];
+      if (t >= a.t) {
+        const k = (t - a.t) / Math.max(1e-6, b.t - a.t);
+        return { x: a.x + (b.x - a.x) * k, y: a.y + (b.y - a.y) * k, pose: k < 0.5 ? a.pose : b.pose, yaw: k < 0.5 ? a.yaw : b.yaw };
+      }
+    }
+    return { x: h[0].x, y: h[0].y, pose: h[0].pose, yaw: h[0].yaw };
+  }
+
+  recordHistory(dt) {
+    for (const p of this.players.values()) {
+      // Zeitstempel = Zeitpunkt, zu dem diese Position galt (Ende des vorigen Takts).
+      p.hist.push({ t: this.time - dt, x: p.x, y: p.y, pose: p.pose, yaw: p.pose ? p.poseYaw : p.yaw });
+      while (p.hist.length && p.hist[0].t < this.time - MAX_REWIND - 0.1) p.hist.shift();
+    }
   }
 
   /** Bemalung eines Spielers setzen (vom Client oder von einem Bot). */
@@ -196,7 +240,8 @@ export class Game {
         p.seekerRounds++;
         p.x = this.seekerSpawn.x + (this.rng() - 0.5) * 40;
         p.y = this.seekerSpawn.y + (this.rng() - 0.5) * 40;
-        if (isSolidAt(this.map, p.x, p.y)) { p.x = this.seekerSpawn.x; p.y = this.seekerSpawn.y; }
+        // Ganzen Koerperkreis pruefen, nicht nur den Mittelpunkt - sonst klemmt der Sucher in der Mauer.
+        if (circleHitsSolid(this.map, p.x, p.y)) { p.x = this.seekerSpawn.x; p.y = this.seekerSpawn.y; }
       } else {
         p.role = C.ROLE_HIDER;
         const s = this.hiderSpawn(used);
@@ -220,6 +265,7 @@ export class Game {
     p.dashT = 0; p.stunT = 0; p.respawnT = 0; p.splatT = 0;
     p.roundScore = 0; p.survivePts = 0; p.catches = 0;
     p.actions = { primary: false, decoy: false, dash: false, pose: false };
+    p.aim = null; p.hist = [];      // Neustart: kein Rueckspulen ueber den Teleport hinweg
   }
 
   becomeSeeker(p, immediate = false) {
@@ -232,6 +278,7 @@ export class Game {
     p.x = this.seekerSpawn.x;
     p.y = this.seekerSpawn.y;
     p.vx = 0; p.vy = 0;
+    p.aim = null; p.hist = [];
   }
 
   ensureSeekerExists() {
@@ -266,8 +313,10 @@ export class Game {
   }
 
   checkRoundEnd() {
-    if (this.phase !== C.PHASE_HUNT) return;
+    if (this.phase !== C.PHASE_HUNT && this.phase !== C.PHASE_PREP) return;
     if (this.players.size < C.MIN_PLAYERS) { this.toLobby(); return; }
+    // Alle Chamaeleons schon in der Vorbereitung weg: Runde mit neuen Rollen neu starten.
+    if (this.phase === C.PHASE_PREP) { if (this.hiders.length === 0) this.startRound(); return; }
     if (this.aliveHiders.length === 0) this.endRound(C.ROLE_SEEKER);
   }
 
@@ -314,6 +363,8 @@ export class Game {
       if (this.allReady()) this.startRound();
     }
 
+    // Verlauf VOR der Bewegung speichern: Schuesse in diesem Takt spulen darauf zurueck.
+    this.recordHistory(dt);
     for (const p of this.players.values()) this.updatePlayer(p, dt);
     this.updateDecoys(dt);
     this.updateSplats(dt);
@@ -329,6 +380,7 @@ export class Game {
     if (!p.alive) {
       p.respawnT -= dt;
       p.vx = 0; p.vy = 0;
+      this.clearActions(p);            // Tasten aus der Gefangenenzeit nicht mitnehmen (z. B. Dash per Shift)
       if (p.respawnT <= 0) {
         this.becomeSeeker(p, true);
         this.pushEvent({ k: 'respawn', id: p.id, name: p.name });
@@ -361,6 +413,7 @@ export class Game {
 
     // Pose wechseln (nur Chamaeleons, nur im Stand)
     if (isHider && p.actions.pose && !frozen) {
+      if (p.pose === 0) p.poseYaw = p.yaw;      // Koerper bleibt so liegen, wie er abgelegt wurde
       p.pose = (p.pose + 1) % C.POSES.length;
       p.vx = 0; p.vy = 0;
       this.pushEvent({ k: 'pose', id: p.id, pose: p.pose });
@@ -423,9 +476,10 @@ export class Game {
     const own = this.decoys.filter((d) => d.owner === p.id).length;
     if (own >= C.DECOY_MAX_PER_PLAYER) return;
     if (isSolidAt(this.map, p.x, p.y)) return;
-    const id = 'd' + (nextEntityId++);
+    // Gleiche ID-Form wie echte Spieler, damit Sucher Koeder nicht an der ID erkennen.
+    const id = 'p' + (900000 + nextEntityId++);
     this.decoys.push({
-      id, x: p.x, y: p.y, yaw: p.yaw, pose: p.pose, paint: p.paint, avgColor: p.avgColor.slice(),
+      id, x: p.x, y: p.y, yaw: p.pose ? p.poseYaw : p.yaw, pose: p.pose, paint: p.paint, avgColor: p.avgColor.slice(),
       owner: p.id, t: C.DECOY_LIFETIME,
     });
     p.decoyCd = C.DECOY_COOLDOWN;
@@ -443,22 +497,26 @@ export class Game {
    */
   tryShoot(p) {
     p.shotCd = C.SHOT_COOLDOWN;
+    const aim = p.aim ?? { yaw: p.yaw, pitch: p.pitch, lag: 0 };
+    p.aim = null;
     // Leichte Streuung, damit Dauerfeuer aus der Ferne nicht trivial ist.
-    const yaw = p.yaw + (this.rng() - 0.5) * C.SHOT_SPREAD * 2;
-    const pitch = p.pitch + (this.rng() - 0.5) * C.SHOT_SPREAD * 2;
+    const yaw = aim.yaw + (this.rng() - 0.5) * C.SHOT_SPREAD * 2;
+    const pitch = aim.pitch + (this.rng() - 0.5) * C.SHOT_SPREAD * 2;
     const o = { x: p.x / TILE_PX, y: p.y / TILE_PX, h: C.EYE_H };
     const d = dirFromAngles(yaw, pitch);
     const wall = raycast3D(this.map, o, d, C.SHOT_RANGE);
     const maxT = wall ? wall.dist : C.SHOT_RANGE;
 
+    // Lag-Ausgleich: Der Schuetze sah die Ziele dort, wo sie vor `aim.lag` Sekunden standen.
     let best = null, bestT = maxT, bestDecoy = false;
     for (const h of this.players.values()) {
       if (h.role !== C.ROLE_HIDER || !h.alive) continue;
-      const t = rayHitsCylinder(o, d, h.x / TILE_PX, h.y / TILE_PX, C.BODY_R, Game.bodyHeight(h.pose));
+      const at = this.positionAt(h, aim.lag);
+      const t = rayHitsBody(o, d, at.x / TILE_PX, at.y / TILE_PX, at.pose, at.yaw);
       if (t !== null && t < bestT) { best = h; bestT = t; bestDecoy = false; }
     }
     for (const dc of this.decoys) {
-      const t = rayHitsCylinder(o, d, dc.x / TILE_PX, dc.y / TILE_PX, C.BODY_R, Game.bodyHeight(dc.pose));
+      const t = rayHitsBody(o, d, dc.x / TILE_PX, dc.y / TILE_PX, dc.pose, dc.yaw);
       if (t !== null && t < bestT) { best = dc; bestT = t; bestDecoy = true; }
     }
 
@@ -542,7 +600,7 @@ export class Game {
       const dist = Math.hypot(d.x - me.x, d.y - me.y);
       if (dist > C.VIEW_RADIUS) continue;
       list.push({
-        id: d.id, name: seesLikeSeeker ? null : 'Köder', x: r1(d.x), y: r1(d.y), yaw: r2(d.yaw),
+        id: d.id, name: seesLikeSeeker ? null : 'Köder', x: r1(d.x), y: r1(d.y), yaw: r2(d.yaw), pitch: 0,
         role: C.ROLE_HIDER, alive: true, pose: d.pose, stun: 0, sprint: false, dash: false,
         painting: false, decoy: !seesLikeSeeker, still: true,
         owner: seesLikeSeeker ? undefined : d.owner, life: seesLikeSeeker ? undefined : Math.round(d.t),
@@ -564,7 +622,7 @@ export class Game {
       winner: this.lastWinner,
       you: {
         id: me.id, x: r1(me.x), y: r1(me.y), vx: r1(me.vx), vy: r1(me.vy),
-        role: me.role, alive: me.alive, pose: me.pose, painting: me.painting,
+        role: me.role, alive: me.alive, pose: me.pose, poseYaw: r2(me.poseYaw), painting: me.painting,
         stamina: Math.round(me.stamina),
         cd: { decoy: r1(me.decoyCd), dash: r1(me.dashCd), shot: r1(me.shotCd) },
         stun: r1(me.stunT), respawn: r1(me.respawnT), dash: me.dashT > 0,
@@ -581,7 +639,7 @@ export class Game {
 
   publicView(p, name) {
     return {
-      id: p.id, name, x: r1(p.x), y: r1(p.y), yaw: r2(p.yaw), pitch: r2(p.pitch),
+      id: p.id, name, x: r1(p.x), y: r1(p.y), yaw: r2(p.pose ? p.poseYaw : p.yaw), pitch: r2(p.pitch),
       role: p.role, alive: p.alive, pose: p.pose,
       stun: r1(p.stunT), sprint: p.sprinting, dash: p.dashT > 0, painting: p.painting,
       decoy: false, still: p.stillTime > 0.8,
@@ -590,6 +648,8 @@ export class Game {
 
   /** Ereignisse mit Position: Jaeger bekommen sie nur in Sichtweite. */
   eventVisibleTo(ev, me) {
+    // Dass gerade ein Koeder gesetzt wurde, geht Sucher nichts an.
+    if (ev.k === 'decoy' && (me.role === C.ROLE_SEEKER || !me.alive)) return false;
     if (ev.x === undefined) return true;
     if (me.role !== C.ROLE_SEEKER && me.alive) return true;
     return Math.hypot(ev.x - me.x, ev.y - me.y) < C.VIEW_RADIUS;

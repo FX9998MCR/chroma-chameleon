@@ -11,7 +11,10 @@ Farbmarkierer, was ihnen verdächtig vorkommt. Wer getroffen wird, sucht mit.
   entscheidet allein deine Bemalung, deine Pose und dein Stillstand – wie im Vorbild.
 - Third-Person-Kamera, Maussteuerung, Malmodus mit Pinsel direkt auf dem Körper
 - Server-autoritative Bewegung und Treffer, Wände sind echte 3D-Hindernisse
-- Prozedurale Low-Poly-Figuren und Arena, kein Download, keine Konten, keine Tracker
+- Prozedurale Figuren und Arena mit Steinmauern, gemusterten Böden, Wasser, Himmel und
+  Landschaft – kein Download, keine Konten, keine Tracker
+- Räumlicher Klang: Schüsse und Schritte kommen aus ihrer Richtung und werden mit der
+  Entfernung leiser
 
 ## Allein spielen
 
@@ -84,9 +87,16 @@ Jede Bewegung löst die Pose.
 | `Leertaste` | Pipette (im Malmodus) | – |
 | `R` | **Pose** wechseln | – |
 | `Q` | **Köder**: eine bemalte, posierende Kopie von dir – wer sie trifft, ist 1,6 s benommen (24 s) | – |
-| Linke Maustaste | malen (im Malmodus) | **Farbmarkierer**: Treffer = gefunden (1 s, 16 m Reichweite) |
+| Linke Maustaste | malen (im Malmodus) | **Farbmarkierer**: trifft genau dort, wo das Fadenkreuz ist (1 s, 16 m Reichweite) |
 | `Tab` | Punktetafel | Punktetafel |
 | `Enter` | Chat | Chat |
+
+Der erste Klick ins Spiel fängt nur die Maus, erst danach schießt ein Klick. Unter
+**⚙️ Einstellungen** im Menü lassen sich Maus-Empfindlichkeit und „Maus Y invertieren"
+einstellen; beides wird im Browser gespeichert.
+
+Im Malmodus zeigt die **Tarnanzeige**, wie gut die Körperfarbe zur nächsten Wand bzw. zum
+Boden passt. Der Pinsel bleibt immer auf der Körperfläche, auf der der Strich begann.
 
 ### Punkte
 
@@ -128,10 +138,14 @@ Der Client malt auf ein Canvas und schickt es als PNG (höchstens 4-mal pro Seku
 420 KB) an den Server, der es an alle im Raum weiterreicht und Neuankömmlingen
 nachliefert. Bots senden statt PNG eine Füllfarbe. Bei Rundenstart wird alles weiß.
 
-**Treffer.** Ein Schuss ist ein Strahl aus Augenhöhe entlang der Blickrichtung mit
-leichter Streuung. Er endet an der ersten Mauer (3D-DDA über das Kachelraster mit
-Wandhöhen); trifft er vorher den Zylinder einer Figur – Radius 34 cm, Höhe je Pose –
-zählt der Treffer. Köder sind für Sucher von echten Figuren nicht zu unterscheiden.
+**Treffer.** Der Client bestimmt beim Klick, welchen Punkt das Fadenkreuz trifft (Strahl
+von der Kamera durch die Bildmitte), und schickt die Richtung von der Augenhöhe der Figur
+zu diesem Punkt. Der Server prüft sie auf Plausibilität und schießt: ein Strahl mit
+leichter Streuung, der an der ersten Mauer endet (3D-DDA über das Kachelraster mit
+Wandhöhen). Trifft er vorher eine Figur – Zylinder mit Radius 34 cm und Höhe je Pose,
+liegende Figuren in voller Länge – zählt der Treffer. Dabei spult der Server die Ziele um
+die Netzlaufzeit zurück, so dass zählt, was der Schütze gesehen hat. Köder sind für
+Sucher von echten Figuren nicht zu unterscheiden.
 
 **Karte.** 64 × 44 Kacheln. Farbzonen per Voronoi, Mauerblöcke, Büsche, Wasser und
 frei stehende Säulen als Haken-Anker. Ein Flood-Fill garantiert, dass jede begehbare
@@ -143,7 +157,7 @@ Kachel erreichbar ist. Jeder Raum bekommt einen eigenen Seed.
 npm test
 ```
 
-55 Tests: Kartengenerator, Physik (Kollision, Gleiten, blickrelative Bewegung, 3D-Strahlen
+69 Tests: Kartengenerator, Physik (Kollision, Gleiten an Ecken, blickrelative Bewegung, 3D-Strahlen
 gegen Boden/Mauer/Säule, Zylinder-Treffer, Wandfarben), Spielregeln (Rollen, Phasen,
 Schuss mit Sichtlinie und Reichweite, Posen inkl. Trefferhöhe, Malmodus-Sperre, Bemalung,
 Köder, Ausdauer, Punkte), Bots (Wegfindung, Verstecken + Anmalen, Wahrnehmung, Stresstest)

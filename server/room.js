@@ -107,10 +107,10 @@ export class Room {
       protocol: C.PROTOCOL_VERSION,
       map: this.mapPayload,
       tick: C.TICK_RATE,
-    });
+    }, true);
     // Bemalungen der Anwesenden nachliefern, sonst waeren alle weiss.
     const items = this.game.paintSnapshot();
-    if (items.length) this.send(ws, { t: 'paintall', items });
+    if (items.length) this.send(ws, { t: 'paintall', items }, true);
     this.broadcastLobby();
     return id;
   }
@@ -154,21 +154,14 @@ export class Room {
     c.lastSeen = Date.now();
     switch (msg.t) {
       case 'input':
-        this.game.setInput(id, msg.k ?? {}, msg.a ?? null, msg.look ?? null, Number(msg.seq));
+        this.game.setInput(id, msg.k ?? {}, msg.a ?? null, msg.look ?? null, Number(msg.seq), msg.aim ?? null);
         break;
-      case 'paint': {
-        // Ratenbegrenzung: Texturen sind gross, mehr als ein paar pro Sekunde braucht niemand.
-        const now = Date.now();
-        c.paintBudget = Math.min(C.PAINT_MSG_PER_SEC, c.paintBudget + ((now - c.paintRefill) / 1000) * C.PAINT_MSG_PER_SEC);
-        c.paintRefill = now;
-        if (c.paintBudget < 1) return;
-        c.paintBudget -= 1;
-        const paint = validatePaint(msg.paint);
-        if (paint === undefined) return;
-        if (!this.game.setPaint(id, paint, msg.avg)) return;
-        this.broadcast({ t: 'paint', id, paint }, id);
+      case 'paint':
+        // Neueste Fassung merken; versendet wird im Rahmen der Ratenbegrenzung,
+        // notfalls einen Takt spaeter - aber nie verworfen.
+        c.pendingPaint = { raw: msg.paint, avg: msg.avg };
+        this.flushPaint(id, c);
         break;
-      }
       case 'ready':
         this.game.setReady(id, !!msg.ready);
         this.broadcastLobby();
@@ -199,6 +192,19 @@ export class Room {
     }
   }
 
+  flushPaint(id, c, now = Date.now()) {
+    if (!c.pendingPaint) return;
+    c.paintBudget = Math.min(C.PAINT_MSG_PER_SEC, c.paintBudget + ((now - c.paintRefill) / 1000) * C.PAINT_MSG_PER_SEC);
+    c.paintRefill = now;
+    if (c.paintBudget < 1) return;
+    c.paintBudget -= 1;
+    const { raw, avg } = c.pendingPaint;
+    c.pendingPaint = null;
+    const paint = validatePaint(raw);
+    if (paint === undefined) return;
+    if (this.game.setPaint(id, paint, avg)) this.broadcast({ t: 'paint', id, paint }, id, true);
+  }
+
   /** Ein Simulationsschritt plus Versand. Wird vom Server im festen Takt aufgerufen. */
   step(now = Date.now()) {
     if (this.lastTick === null) this.lastTick = now;
@@ -217,6 +223,7 @@ export class Room {
       steps++;
     }
     if (steps === 0) return;
+    for (const [id, c] of this.clients) this.flushPaint(id, c, now);
 
     // AFK-Spieler entfernen, sonst blockieren sie die Rundenlogik.
     for (const [id, c] of this.clients) {
@@ -229,7 +236,10 @@ export class Room {
 
     for (const [id, c] of this.clients) {
       const snap = this.game.snapshotFor(id);
-      if (snap) this.send(c.ws, snap);
+      if (!snap) continue;
+      // Ereignisse eines uebersprungenen Snapshots nachreichen statt sie zu verlieren.
+      if (c.missed) snap.events = c.missed.concat(snap.events);
+      c.missed = this.send(c.ws, snap) ? null : snap.events.slice(-300);
     }
     this.game.flushEvents();
 
@@ -251,17 +261,18 @@ export class Room {
     });
   }
 
-  broadcast(obj, exceptId = null) {
+  broadcast(obj, exceptId = null, critical = false) {
     const data = JSON.stringify(obj);
-    for (const [cid, c] of this.clients) if (cid !== exceptId) this.sendRaw(c.ws, data);
+    for (const [cid, c] of this.clients) if (cid !== exceptId) this.sendRaw(c.ws, data, critical);
   }
 
-  send(ws, obj) { this.sendRaw(ws, JSON.stringify(obj)); }
+  send(ws, obj, critical = false) { return this.sendRaw(ws, JSON.stringify(obj), critical); }
 
-  sendRaw(ws, data) {
-    if (ws.readyState !== 1) return;     // 1 = OPEN
-    // Bei ueberlaufendem Sendepuffer Snapshots ueberspringen statt Speicher zu fressen.
-    if (ws.bufferedAmount > 256 * 1024) return;
-    try { ws.send(data); } catch { /* Verbindung wird gleich abgebaut */ }
+  sendRaw(ws, data, critical = false) {
+    if (ws.readyState !== 1) return false;     // 1 = OPEN
+    // Bei ueberlaufendem Sendepuffer Snapshots ueberspringen statt Speicher zu fressen -
+    // aber nie Nachrichten, die nur einmal kommen (Bemalung, Begruessung).
+    if (!critical && ws.bufferedAmount > 256 * 1024) return false;
+    try { ws.send(data); return true; } catch { return false; }
   }
 }

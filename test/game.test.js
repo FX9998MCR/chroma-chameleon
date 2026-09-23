@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import * as C from '../shared/constants.js';
 import { idx } from '../shared/map.js';
+import { circleHitsSolid } from '../shared/physics.js';
 import { makeGame, ticks, seconds, openSpot, openRun, wallWithFloorSides, place, input, startHunt, aimAt, DT } from './helpers.js';
 
 test('Rollenverteilung: ein Jaeger je angefangene vier Spieler', () => {
@@ -393,4 +394,108 @@ test('Eingaben werden bereinigt', () => {
   assert.equal(p.yaw, 0);
   assert.equal(p.pitch, 1.5, 'Nickwinkel begrenzt');
   assert.equal(p.seq, 5);
+});
+
+test('Zielrichtung vom Fadenkreuz: Schuss folgt aim statt Blickrichtung, unplausible Werte werden ignoriert', () => {
+  const { g } = makeGame(5);
+  startHunt(g);
+  const s = g.seekers[0], h = g.hiders[0];
+  const run = openRun(g.map, 6);
+  place(s, run.x, run.y);
+  place(h, run.x + 96, run.y);
+  const look = aimAt(s, h);
+  // Blick etwas daneben (Kamera sitzt hinter der Schulter), Ziel genau auf die Figur.
+  const send = (aim) => g.setInput(s.id, {}, { primary: true }, { yaw: look.yaw + 0.25, pitch: look.pitch }, 1, aim);
+  s.shotCd = 0;
+  send(null);
+  g.update(DT);
+  assert.equal(h.alive, true, 'ohne Zielrichtung geht der Schuss am Ziel vorbei');
+  s.shotCd = 0;
+  send({ yaw: look.yaw + 2.5, pitch: look.pitch });
+  g.update(DT);
+  assert.equal(h.alive, true, 'unplausible Zielrichtung wird verworfen');
+  s.shotCd = 0;
+  send({ yaw: look.yaw, pitch: look.pitch, lag: 0 });
+  g.update(DT);
+  assert.equal(h.alive, false, 'mit Zielrichtung Treffer');
+});
+
+test('Lag-Ausgleich: Schuss trifft, wo das Ziel beim Schuetzen zu sehen war', () => {
+  const { g } = makeGame(5);
+  startHunt(g);
+  const s = g.seekers[0], h = g.hiders[0];
+  const run = openRun(g.map, 8);
+  place(s, run.x, run.y);
+  place(h, run.x + 96, run.y);
+  const look = aimAt(s, h);
+  ticks(g, 6);                               // Verlauf aufbauen (Ziel steht)
+  place(h, run.x + 96, run.y + 40);         // Ziel ist inzwischen weggelaufen
+  ticks(g, 2);
+  s.shotCd = 0;
+  g.setInput(s.id, {}, { primary: true }, { yaw: look.yaw, pitch: look.pitch }, 1, { yaw: look.yaw, pitch: look.pitch, lag: 0 });
+  g.update(DT);
+  assert.equal(h.alive, true, 'ohne Rueckspulen verfehlt');
+  s.shotCd = 0;
+  g.setInput(s.id, {}, { primary: true }, { yaw: look.yaw, pitch: look.pitch }, 1, { yaw: look.yaw, pitch: look.pitch, lag: 250 });
+  g.update(DT);
+  assert.equal(h.alive, false, 'mit Rueckspulen um 250 ms Treffer');
+});
+
+test('liegende Figur: Kopf und Beine zaehlen als Treffer, Koerper bleibt beim Umschauen liegen', () => {
+  const { g } = makeGame(6);
+  startHunt(g);
+  const s = g.seekers[0], h = g.hiders[0];
+  const run = openRun(g.map, 8);
+  place(s, run.x, run.y);
+  place(h, run.x + 5 * C.TILE, run.y);
+  h.yaw = Math.PI / 2;                       // liegt quer zur Schussbahn, Kopf nach +y
+  for (let i = 0; i < 3; i++) { input(g, h.id, {}, { pose: true }, Math.PI / 2, 0); g.update(DT); }
+  assert.equal(C.POSES[h.pose].id, 'lie');
+  input(g, h.id, {}, null, 2.9, 0);          // Maus dreht, Koerper nicht
+  g.update(DT);
+  assert.equal(h.poseYaw, Math.PI / 2);
+  // Ziel: die Beine, 0,6 m hinter der Huefte - ausserhalb des alten Huefte-Zylinders.
+  const legs = { x: h.x, y: h.y - 0.6 * C.TILE };
+  const look = aimAt(s, legs, 0.2);
+  s.shotCd = 0;
+  g.setInput(s.id, {}, { primary: true }, { yaw: look.yaw, pitch: look.pitch }, 1, { yaw: look.yaw, pitch: look.pitch, lag: 0 });
+  g.update(DT);
+  assert.equal(h.alive, false, 'Beine getroffen');
+});
+
+test('Sucher starten nie mit dem Koerper in einer Mauer', () => {
+  for (let seed = 1; seed <= 40; seed++) {
+    const { g } = makeGame(seed, ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h']);
+    for (let r = 0; r < 3; r++) {
+      g.startRound();
+      for (const s of g.seekers) assert.equal(circleHitsSolid(g.map, s.x, s.y), false, `Karte ${seed}, Runde ${r}`);
+    }
+  }
+});
+
+test('Gefangener nimmt keine Tasten in die Sucherrolle mit (kein Dash nach Wiedereinstieg)', () => {
+  const { g } = makeGame(5);
+  startHunt(g);
+  const s = g.seekers[0], h = g.hiders[0];
+  const spot = openSpot(g.map);
+  place(s, spot.x, spot.y);
+  place(h, spot.x + 64, spot.y);
+  const look = aimAt(s, h);
+  input(g, s.id, {}, { primary: true }, look.yaw, look.pitch);
+  g.update(DT);
+  assert.equal(h.alive, false);
+  input(g, h.id, { sprint: true }, { dash: true }, 0, 0);   // Shift in der Gefangenenzeit
+  seconds(g, C.RESPAWN_SECONDS + 0.3);
+  assert.equal(h.role, C.ROLE_SEEKER);
+  assert.equal(h.dashCd, 0, 'kein ungewollter Dash');
+});
+
+test('alle Chamaeleons gehen schon in der Vorbereitung -> neue Runde statt 15 s Leerlauf', () => {
+  const { g } = makeGame(5, ['a', 'b', 'c', 'd', 'e']);
+  g.startRound();
+  const round = g.round;
+  for (const h of g.hiders) g.removePlayer(h.id);
+  g.update(DT);
+  assert.ok(g.round > round || g.phase === C.PHASE_LOBBY, 'neu gestartet oder Lobby');
+  if (g.phase === C.PHASE_PREP) assert.ok(g.hiders.length > 0);
 });

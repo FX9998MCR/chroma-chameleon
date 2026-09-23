@@ -3,28 +3,34 @@
 import * as THREE from 'three';
 import * as C from '/shared/constants.js';
 import { deserializeMap } from '/shared/map.js';
-import { lerp, angleDiff, raycast3D, dirFromAngles } from '/shared/physics.js';
+import { lerp, angleDiff, raycast3D, dirFromAngles, rayHitsBody } from '/shared/physics.js';
 import { makeFigure, animateHumanoid, rgb, GEO } from './models.js';
-import { buildWorld, animateWorld } from './world.js';
+import { buildWorld, animateWorld, disposeWorld } from './world.js';
 
 const U = 1 / C.TILE;
+// Geometrien fuer Schusseffekte
+GEO.beam = GEO.beam ?? new THREE.CylinderGeometry(0.018, 0.018, 1, 6, 1, true);
+GEO.flash = GEO.flash ?? new THREE.SphereGeometry(0.09, 8, 6);
 
 export class Renderer {
   constructor(container, labelsEl) {
     this.container = container;
     this.labelsEl = labelsEl;
-    this.lowFx = new URLSearchParams(location.search).has('lowfx') || localStorage.getItem('cc-lowfx') === '1';
+    let storedLow = false;
+    try { storedLow = localStorage.getItem('cc-lowfx') === '1'; } catch { /* Speicher gesperrt */ }
+    this.lowFx = new URLSearchParams(location.search).has('lowfx') || storedLow;
     this.renderer = new THREE.WebGLRenderer({ antialias: !this.lowFx, powerPreference: 'high-performance' });
     this.renderer.setPixelRatio(this.lowFx ? 1 : Math.min(window.devicePixelRatio, 2));
     this.renderer.shadowMap.enabled = !this.lowFx;
-    this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    this.renderer.shadowMap.type = THREE.PCFShadowMap;      // PCFSoftShadowMap gibt es in r186 nicht mehr
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    this.renderer.toneMappingExposure = 1.0;
+    this.renderer.toneMappingExposure = 1.05;
     container.appendChild(this.renderer.domElement);
 
     this.scene = new THREE.Scene();
     this.scene.background = new THREE.Color(0x9fc3e6);
-    this.scene.fog = new THREE.Fog(0x9fc3e6, 40, 75);
+    // Nebel vor setMap setzen: die Himmelskuppel nimmt fog.color als Horizontfarbe.
+    this.scene.fog = new THREE.Fog(0x9fc3e6, 45, 110);
 
     this.camera = new THREE.PerspectiveCamera(64, 1, 0.05, 150);
     this.camPos = new THREE.Vector3();
@@ -34,13 +40,15 @@ export class Renderer {
 
     // Licht so ausbalanciert, dass auch Wandseiten im Schatten ihre Farbe zeigen -
     // man muss Farben ablesen koennen, sonst kann man sich nicht anmalen.
-    this.scene.add(new THREE.HemisphereLight(0xe6f0ff, 0x6a705a, 1.35));
+    this.scene.add(new THREE.HemisphereLight(0xdcebff, 0x7d7a62, 1.25));
     this.scene.add(new THREE.AmbientLight(0xffffff, 0.25));
     this.fill = new THREE.DirectionalLight(0xcfe0ff, 0.45);
     this.scene.add(this.fill);
     this.scene.add(this.fill.target);
-    this.sun = new THREE.DirectionalLight(0xfff3e0, 1.25);
+    this.sun = new THREE.DirectionalLight(0xfff0d6, 1.45);
     this.sun.castShadow = true;
+    this.sun.shadow.radius = 3;
+    this.sun.shadow.normalBias = 0.02;
     this.sun.shadow.mapSize.set(2048, 2048);
     const sc = this.sun.shadow.camera;
     sc.left = -22; sc.right = 22; sc.top = 22; sc.bottom = -22; sc.near = 1; sc.far = 90;
@@ -71,7 +79,13 @@ export class Renderer {
     this.renderer.setPixelRatio(on ? 1 : Math.min(window.devicePixelRatio, 2));
     this.renderer.shadowMap.enabled = !on;
     this.scene.traverse((o) => { if (o.isMesh && o.material) o.material.needsUpdate = true; });
+    this.applyDecor();
     this.resize();
+  }
+
+  /** Kulisse (Baeume, Bluetenpunkte) nur ohne Leistungsmodus zeigen. */
+  applyDecor() {
+    this.world?.group.traverse((o) => { if (o.userData.decor) o.visible = !this.lowFx; });
   }
 
   resize() {
@@ -83,9 +97,12 @@ export class Renderer {
   }
 
   setMap(raw) {
-    if (this.world) this.scene.remove(this.world.group);
+    if (this.world) { this.scene.remove(this.world.group); disposeWorld(this.world); }
     this.map = deserializeMap(raw);
     this.world = buildWorld(this.scene, this.map);
+    this.applyDecor();
+    // Shader vorab uebersetzen: weniger Ruckeln beim ersten Bild.
+    if (this.renderer.extensions.has('KHR_parallel_shader_compile')) this.renderer.compileAsync?.(this.scene, this.camera).catch(() => {});
   }
 
   // ---------------------------------------------------------------- Picking
@@ -239,15 +256,64 @@ export class Renderer {
     }
   }
 
-  /** Schuss des Farbmarkierers: Leuchtspur plus Einschlag. */
+  /**
+   * Wohin zeigt das Fadenkreuz? Strahl von der Kamera durch die Bildmitte; der erste
+   * Treffer (Mauer, Boden oder Chamaeleon-Figur) ist der Zielpunkt. Zurueck kommt die
+   * Richtung von der Augenhoehe der eigenen Figur zu diesem Punkt - genau so schiesst
+   * der Server. Ohne diese Korrektur ginge jeder Schuss am Fadenkreuz vorbei, weil die
+   * Kamera hinter und neben der Schulter sitzt.
+   * @returns {{yaw:number, pitch:number}}
+   */
+  aimFrom(meX, meY) {
+    const dir = new THREE.Vector3();
+    this.camera.getWorldDirection(dir);
+    const o = { x: this.camera.position.x, y: this.camera.position.z, h: this.camera.position.y };
+    const d = { x: dir.x, y: dir.z, h: dir.y };
+    const eye = { x: meX * U, y: meY * U, h: C.EYE_H };
+    // Nur Treffer VOR der eigenen Figur zaehlen (die Kamera steht dahinter).
+    const tMin = Math.max(0, (eye.x - o.x) * d.x + (eye.y - o.y) * d.y + (eye.h - o.h) * d.h);
+    const reach = tMin + C.SHOT_RANGE;
+    let bestT = reach;
+    const wall = this.map ? raycast3D(this.map, o, d, reach) : null;
+    if (wall && wall.dist > tMin) bestT = wall.dist;
+    for (const e of this.entities.values()) {
+      if (e.gone || !e.cur || e.role !== C.ROLE_HIDER || !e.group.visible) continue;
+      const t = rayHitsBody(o, d, e.cur.x * U, e.cur.y * U, e.pose, e.cur.yaw);
+      if (t !== null && t > tMin && t < bestT) bestT = t;
+    }
+    const px = o.x + d.x * bestT - eye.x, py = o.y + d.y * bestT - eye.y, ph = o.h + d.h * bestT - eye.h;
+    const flat = Math.hypot(px, py);
+    if (flat + Math.abs(ph) < 0.4) {
+      return { yaw: Math.atan2(d.y, d.x), pitch: Math.atan2(d.h, Math.hypot(d.x, d.y)) };
+    }
+    return { yaw: Math.atan2(py, px), pitch: Math.atan2(ph, flat) };
+  }
+
+  /** Schuss des Farbmarkierers: Leuchtspur von der Muendung, Muendungsblitz und Einschlag. */
   shot(ev) {
-    const a = new THREE.Vector3(ev.from.x, ev.from.h, ev.from.y);
     const b = new THREE.Vector3(ev.to.x, ev.to.h, ev.to.y);
-    const geo = new THREE.BufferGeometry().setFromPoints([a, b]);
-    const line = new THREE.Line(geo, new THREE.LineBasicMaterial({ color: ev.hit ? 0xff4d6d : 0xffb070, transparent: true, opacity: 0.95 }));
-    line.userData.life = 0.14;
-    this.scene.add(line);
-    this.tracers.push(line);
+    // Start an der Muendung der Waffe, wenn die Figur sichtbar ist - sonst Augenhoehe.
+    const shooter = ev.id === this.meId ? this.me : this.entities.get(ev.id)?.group;
+    const a = new THREE.Vector3(ev.from.x, ev.from.h, ev.from.y);
+    const muzzle = shooter?.visible ? shooter.userData.muzzle : null;
+    if (muzzle) { shooter.updateMatrixWorld(true); muzzle.getWorldPosition(a); }
+    const len = a.distanceTo(b);
+    if (len > 0.05) {
+      // Leuchtender Strahl als duenner Zylinder (Linien sind in WebGL nur 1 Pixel breit).
+      const color = ev.hit ? 0xff3d6e : 0xffa24a;
+      const beam = new THREE.Mesh(GEO.beam, new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.95, blending: THREE.AdditiveBlending, depthWrite: false }));
+      beam.position.copy(a).lerp(b, 0.5);
+      beam.scale.set(1, len, 1);
+      beam.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), b.clone().sub(a).normalize());
+      beam.userData.life = 0.22; beam.userData.max = 0.22;
+      this.scene.add(beam);
+      this.tracers.push(beam);
+      const flash = new THREE.Mesh(GEO.flash, new THREE.MeshBasicMaterial({ color: 0xffe0a0, transparent: true, opacity: 1, blending: THREE.AdditiveBlending, depthWrite: false }));
+      flash.position.copy(a);
+      flash.userData.life = 0.08; flash.userData.max = 0.08;
+      this.scene.add(flash);
+      this.tracers.push(flash);
+    }
     if (ev.wall) {
       // Farbfleck an der Wand/am Boden, ausgerichtet an der Flaechennormalen.
       const n = new THREE.Vector3(ev.wall.nx, ev.wall.nh, ev.wall.ny);
@@ -274,12 +340,14 @@ export class Renderer {
     this.clock += dt;
     const renderT = f.now - C.INTERP_DELAY_MS;
     this.paintMode = !!f.paintMode;
+    this.meId = f.meId;
 
     if (f.me) {
       this.ensureMe(f.me.role);
       const g = this.me;
       g.position.set(f.me.x * U, 0, f.me.y * U);
-      const targetRot = -f.me.yaw;
+      // In einer Pose bleibt der Koerper liegen, wie er abgelegt wurde; die Kamera dreht frei.
+      const targetRot = -(f.me.bodyYaw ?? f.me.yaw);
       g.rotation.y += angleDiff(g.rotation.y, targetRot) * Math.min(1, dt * 16);
       animateHumanoid(g, f.me.speed ?? 0, dt, f.me.pose, f.me.stun > 0, f.me.pitch);
       g.visible = f.me.alive;
@@ -324,8 +392,9 @@ export class Renderer {
     for (let i = this.tracers.length - 1; i >= 0; i--) {
       const t = this.tracers[i];
       t.userData.life -= dt;
-      t.material.opacity = Math.max(0, t.userData.life / 0.14);
-      if (t.userData.life <= 0) { this.scene.remove(t); t.geometry.dispose(); t.material.dispose(); this.tracers.splice(i, 1); }
+      t.material.opacity = Math.max(0, t.userData.life / (t.userData.max ?? 0.14));
+      if (t.userData.max) t.scale.x = t.scale.z = 0.4 + 0.6 * Math.max(0, t.userData.life / t.userData.max);
+      if (t.userData.life <= 0) { this.scene.remove(t); t.material.dispose(); this.tracers.splice(i, 1); }   // Geometrie ist geteilt
     }
     for (let i = this.particles.length - 1; i >= 0; i--) {
       const m = this.particles[i], u = m.userData;
@@ -341,43 +410,50 @@ export class Renderer {
     this.renderer.render(this.scene, this.camera);
   }
 
-  /** Third-Person-Kamera: hinter der Figur, leicht ueber der Schulter, weicht Mauern aus. */
+  /**
+   * Third-Person-Kamera: hinter der Figur, leicht ueber der Schulter.
+   * - Schulterversatz nur so weit, wie seitlich Platz ist (sonst landet der Drehpunkt in der Mauer).
+   * - Nie hoeher als knapp unter die Innenmauern: kein Blick ueber Mauern in den Nachbargang.
+   * - Steht eine Mauer im Weg, sitzt die Kamera immer DAVOR; heran sofort, zurueck weich.
+   * - Ist die Kamera sehr nah am Kopf, wird die eigene Figur ausgeblendet.
+   * Das Fadenkreuz bleibt stimmig, weil aimFrom() mit der echten Kamerarichtung rechnet.
+   */
   updateCamera(f, dt) {
     const me = f.me;
     const pivotH = this.paintMode ? 0.95 : 1.35;
     let yaw, pitch, dist, side;
     if (this.paintMode) { yaw = this.orbit.yaw; pitch = this.orbit.pitch; dist = this.orbit.dist; side = 0; }
     else { yaw = me.yaw; pitch = me.pitch; dist = 3.1; side = 0.45; }
+    const cx = me.x * U, cz = me.y * U;
     const rx = -Math.sin(yaw), rz = Math.cos(yaw);     // rechts
-    const pivot = { x: me.x * U + rx * side, y: pivotH, z: me.y * U + rz * side };
-    // Mauern ausweichen: Strahl vom Drehpunkt nach hinten. Ist der Platz knapp,
-    // schaut die Kamera stattdessen steiler von oben - so bleibt die Figur klein.
-    const free = (pt) => {
-      const dd = dirFromAngles(yaw, pt);
-      const hit = this.map ? raycast3D(this.map, { x: pivot.x, y: pivot.z, h: pivot.y }, { x: -dd.x, y: -dd.y, h: -dd.h }, dist + 0.3) : null;
-      return hit ? Math.max(0.35, hit.dist - 0.3) : dist;
-    };
-    let usePitch = pitch, useDist = free(pitch);
-    if (useDist < 1.4 && !this.paintMode) {
-      for (const extra of [0.35, 0.7, 1.05]) {
-        const pt = Math.max(-1.35, pitch - extra);     // negativer Nickwinkel = Blick nach unten
-        const fd = free(pt);
-        if (fd > useDist + 0.2) { useDist = fd; usePitch = pt; }
-        if (useDist >= 1.4) break;
-      }
+    if (side > 0 && this.map) {
+      const sh = raycast3D(this.map, { x: cx, y: cz, h: pivotH }, { x: rx, y: rz, h: 0 }, side + 0.25);
+      if (sh) side = Math.max(0, sh.dist - 0.25);
     }
-    this.camPitchSmooth = this.camPitchSmooth === undefined ? usePitch : this.camPitchSmooth + (usePitch - this.camPitchSmooth) * Math.min(1, dt * 6);
-    const d = dirFromAngles(yaw, this.paintMode ? pitch : this.camPitchSmooth);
-    dist = useDist;
+    const pivot = new THREE.Vector3(cx + rx * side, pivotH, cz + rz * side);
+    const d = dirFromAngles(yaw, pitch);
+    // Wunschposition, Hoehe begrenzt (Innenmauern sind 2,4 m hoch)
     const want = new THREE.Vector3(pivot.x - d.x * dist, pivot.y - d.h * dist, pivot.z - d.y * dist);
-    if (want.y < 0.15) want.y = 0.15;
+    const capH = C.WALL_H_INNER - 0.25;
+    if (want.y > capH) want.y = capH;
+    if (want.y < 0.2) want.y = 0.2;
+    // Mauern zwischen Drehpunkt und Kamera
+    const back = want.clone().sub(pivot);
+    const len = back.length();
+    back.divideScalar(Math.max(len, 1e-6));
+    const hit = this.map ? raycast3D(this.map, { x: pivot.x, y: pivot.z, h: pivot.y }, { x: back.x, y: back.z, h: back.y }, len + 0.25) : null;
+    const target = hit ? Math.max(0.05, Math.min(len, hit.dist - 0.25)) : len;
+    this.camDist = (this.camDist === undefined || target < this.camDist) ? target : this.camDist + (target - this.camDist) * Math.min(1, dt * 5);
+    const pos = pivot.clone().addScaledVector(back, this.camDist);
     const k = this.paintMode ? Math.min(1, dt * 10) : 1;
-    this.camPos.lerp(want, k);
+    this.camPos.lerp(pos, k);
     this.camera.position.copy(this.camPos);
-    const look = new THREE.Vector3(pivot.x + d.x * 3, pivot.y + d.h * 3, pivot.z + d.y * 3);
-    if (this.paintMode) look.set(pivot.x, pivot.y, pivot.z);
+    const look = this.paintMode
+      ? new THREE.Vector3(pivot.x, pivot.y, pivot.z)
+      : new THREE.Vector3(pivot.x + d.x * 3, pivot.y + d.h * 3, pivot.z + d.y * 3);
     this.camLook.lerp(look, k);
     this.camera.lookAt(this.camLook);
+    if (this.me) this.me.visible = !!me.alive && (this.paintMode || this.camDist > 0.55);
   }
 
   /** Malmodus: Umlaufbahn mit dem meisten freien Platz um die Figur waehlen. */
@@ -431,7 +507,7 @@ export class Renderer {
 
   clearAll() {
     for (const id of [...this.entities.keys()]) this.removeEntity(id);
-    for (const [k, m] of this.splats) { this.scene.remove(m); this.splats.delete(k); }
+    for (const [k, m] of this.splats) { this.scene.remove(m); m.material.dispose(); this.splats.delete(k); }
     for (const d of this.decals) { this.scene.remove(d); d.material.dispose(); }
     this.decals = [];
     this.pendingPaint.clear();
