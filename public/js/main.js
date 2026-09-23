@@ -11,6 +11,8 @@ import { Hud } from './hud.js';
 import { Painter } from './paint.js';
 
 const $ = (id) => document.getElementById(id);
+// Text sicher in HTML einsetzen (Spielernamen landen in innerHTML-Meldungen).
+const esc = (t) => String(t ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
 const ui = {
   menu: $('menu'), lobby: $('lobby'), name: $('name'), code: $('code'), menuError: $('menu-error'),
@@ -31,16 +33,35 @@ try {
     + '\nBitte im Browser die Hardwarebeschleunigung aktivieren oder den Leistungsmodus (?lowfx=1 an die Adresse anhängen) probieren.');
   throw err;
 }
+// Ab hier laeuft das Spiel: Einzelfehler gehen in die Konsole statt in den Vollbild-Fehlerkasten.
+window.__booted = true;
 const input = new Input(renderer.renderer.domElement);
 const audio = new Audio();
 const hud = new Hud();
 let net = null;
 let painter = null;
+let pendingAim = null;     // Zielrichtung zum Zeitpunkt des Klicks
+
+// Treffermarker: kurzes X um das Fadenkreuz, rot bei Fang.
+const hitmarker = document.createElement('div');
+hitmarker.id = 'hitmarker';
+hitmarker.setAttribute('aria-hidden', 'true');
+hitmarker.style.cssText = 'position:fixed;left:50%;top:50%;width:34px;height:34px;margin:-17px 0 0 -17px;pointer-events:none;z-index:13;opacity:0;transition:opacity .25s ease-out;';
+hitmarker.innerHTML = '<svg viewBox="0 0 34 34" width="34" height="34"><g stroke="currentColor" stroke-width="3" stroke-linecap="round"><path d="M4 4l8 8M30 4l-8 8M4 30l8-8M30 30l-8-8"/></g></svg>';
+document.body.appendChild(hitmarker);
+let hitmarkerTimer = 0;
+function showHitmarker(color) {
+  hitmarker.style.color = color;
+  hitmarker.style.transition = 'none';
+  hitmarker.style.opacity = '1';
+  clearTimeout(hitmarkerTimer);
+  hitmarkerTimer = setTimeout(() => { hitmarker.style.transition = 'opacity .25s ease-out'; hitmarker.style.opacity = '0'; }, 120);
+}
 
 const S = {
   meId: null, name: '', room: null, hostId: null, map: null,
   state: null, stateAt: 0, you: null,
-  pred: null, seq: 0,
+  pred: null, seq: 0, predHist: [],
   ready: false,
   phase: C.PHASE_LOBBY,
   inGame: false,
@@ -49,9 +70,10 @@ const S = {
 };
 
 // ---------------------------------------------------------------- Menue
-ui.name.value = localStorage.getItem('cc-name') ?? '';
-ui.lowfx.checked = localStorage.getItem('cc-lowfx') === '1';
-ui.lowfx.onchange = () => { localStorage.setItem('cc-lowfx', ui.lowfx.checked ? '1' : '0'); renderer.setLowFx(ui.lowfx.checked); };
+// localStorage kann gesperrt sein (privates Fenster) - dann ohne gespeicherte Werte weiter.
+ui.name.value = loadSetting('cc-name', '');
+ui.lowfx.checked = loadSetting('cc-lowfx', '0') === '1';
+ui.lowfx.onchange = () => { saveSetting('cc-lowfx', ui.lowfx.checked ? '1' : '0'); renderer.setLowFx(ui.lowfx.checked); };
 const urlRoom = new URLSearchParams(location.search).get('raum');
 if (urlRoom) ui.code.value = urlRoom.toUpperCase().slice(0, C.ROOM_CODE_LEN);
 
@@ -59,7 +81,7 @@ function showError(msg) { ui.menuError.textContent = msg; ui.menuError.hidden = 
 
 function start(mode) {
   const name = ui.name.value.trim().slice(0, C.NAME_MAX);
-  localStorage.setItem('cc-name', name);
+  saveSetting('cc-name', name);
   const room = ui.code.value.trim().toUpperCase();
   if (mode === 'join' && room.length !== C.ROOM_CODE_LEN) { showError('Bitte einen 4-stelligen Raumcode eingeben.'); return; }
   showError('');
@@ -136,6 +158,10 @@ function renderLobby(msg) {
 function connect(join) {
   net = new Net();
   painter = new Painter(renderer, input, net);
+  input.onPrimary = () => {
+    if (!S.pred || S.you?.role !== C.ROLE_SEEKER) return;
+    pendingAim = renderer.aimFrom(S.pred.x, S.pred.y);
+  };
   input.onTogglePaint = () => {
     if (!S.you || S.you.role !== C.ROLE_HIDER || !S.you.alive || S.phase === C.PHASE_OVER || S.phase === C.PHASE_LOBBY) return;
     painter.toggle();
@@ -176,16 +202,32 @@ function onState(st) {
 
   if (!S.pred) S.pred = { x: you.x, y: you.y, vx: you.vx, vy: you.vy, role: you.role };
   S.pred.role = you.role;
-  const ex = you.x - S.pred.x, ey = you.y - S.pred.y;
+  // Abgleich mit dem Server: Verglichen wird mit der Position, die wir vorhergesagt hatten,
+  // als wir die letzte vom Server verarbeitete Eingabe (st.seq) schickten - nicht mit der
+  // aktuellen. Sonst zieht die alte Serverposition die Figur beim Laufen staendig zurueck.
+  const hist = S.predHist;
+  let ref = null;
+  while (hist.length && hist[0].seq < st.seq) hist.shift();
+  if (hist.length && hist[0].seq === st.seq) ref = hist.shift();
+  const ex = you.x - (ref ? ref.x : S.pred.x), ey = you.y - (ref ? ref.y : S.pred.y);
   const err = Math.hypot(ex, ey);
-  if (!canPredict() || err > 64) { S.pred.x = you.x; S.pred.y = you.y; S.pred.vx = you.vx; S.pred.vy = you.vy; }
-  else { S.pred.x += ex * 0.3; S.pred.y += ey * 0.3; }
+  if (!canPredict() || err > 64) {
+    S.pred.x = you.x; S.pred.y = you.y; S.pred.vx = you.vx; S.pred.vy = you.vy;
+    hist.length = 0;
+  } else if (err > 0.5) {
+    // Sanft korrigieren und die noch offenen Eintraege mitverschieben.
+    const k = ref ? 0.35 : 0.3;
+    S.pred.x += ex * k; S.pred.y += ey * k;
+    for (const h of hist) { h.x += ex * k; h.y += ey * k; }
+  }
 
   renderer.pushSnapshot(st, now);
 
   if (st.phase !== S.lastPhaseSeen) {
     S.lastPhaseSeen = st.phase;
     S.phase = st.phase;
+    // Lobby-Tafel sofort weg, nicht erst mit der naechsten Lobby-Nachricht (bis zu 1 s spaeter).
+    if (st.phase !== C.PHASE_LOBBY) { ui.lobby.hidden = true; input.wantLock = true; }
     if (st.phase === C.PHASE_PREP) {
       renderer.clearAll();
       painter?.reset();
@@ -215,14 +257,21 @@ function onState(st) {
 
 function handleEvent(ev) {
   const me = S.meId;
-  const near = (x, y) => S.pred && Math.hypot(x - S.pred.x, y - S.pred.y) < 700;
   switch (ev.k) {
     case 'shot':
       renderer.shot(ev);
-      if (ev.id === me || near(ev.x, ev.y)) { ev.hit ? audio.catchHit() : audio.lashMiss(); }
+      if (ev.id === me && ev.hit) showHitmarker('#ffffff');
+      {
+        // Eigener Schuss direkt, fremde raeumlich (Sucher hoeren sich gegenseitig, Chamaeleons hoeren die Gefahr).
+        const pos = ev.id === me ? null : { x: ev.x, y: ev.y };
+        audio.shot(pos);
+        const endPos = { x: ev.to.x * C.TILE, y: ev.to.y * C.TILE };
+        if (ev.hit) audio.catchHit(ev.id === me ? null : endPos); else if (ev.id === me) audio.lashMiss(endPos);
+      }
       break;
     case 'catch':
       if (ev.who === me) { audio.caught(); hud.showCenter('<span class="big">Gefunden!</span>', 2500); }
+      if (ev.by === me) { showHitmarker('#ff3d6e'); hud.showCenter(`<span class="big">Gefunden!</span>${esc(ev.whoName)} +${C.PTS_CATCH}`, 1600); }
       hud.feed(`${ev.byName} hat ${ev.whoName} gefunden · ${ev.left} übrig`, 'catch');
       break;
     case 'paint':
@@ -236,7 +285,7 @@ function handleEvent(ev) {
       break;
     case 'decoypop':
       renderer.burst(ev.x, ev.y, 0xf0b429, 20, 4);
-      if (near(ev.x, ev.y)) audio.decoyPop();
+      audio.decoyPop({ x: ev.x, y: ev.y });
       if (ev.owner === me) hud.feed('Dein Köder hat einen Sucher reingelegt! +' + C.PTS_DECOY_HIT, 'good');
       if (ev.by === me) hud.feed('Das war ein Köder – du bist kurz benommen.', 'catch');
       break;
@@ -244,7 +293,7 @@ function handleEvent(ev) {
       renderer.burst(ev.x, ev.y, 0xf0b429, 6, 1.5);
       break;
     case 'dash':
-      if (ev.id === me || near(ev.x, ev.y)) audio.dash();
+      audio.dash(ev.id === me ? null : { x: ev.x, y: ev.y });
       break;
     case 'roundend': {
       const won = hud.roundEnd(ev, S.you?.role);
@@ -260,6 +309,17 @@ function handleEvent(ev) {
     case 'join': hud.chat('', `${ev.name} ist beigetreten.`, true); break;
     case 'leave': hud.chat('', `${ev.name} hat den Raum verlassen.`, true); break;
     default: break;
+  }
+}
+
+/** Schritte der anderen Figuren: leise und raeumlich - wer rennt, ist zu hoeren. */
+function footsteps(dt) {
+  for (const e of renderer.entities.values()) {
+    if (e.gone || !e.cur || !e.group.visible) continue;
+    const sp = e.speedEst ?? 0;
+    if (sp < 40) { e.stepT = 0; continue; }
+    e.stepT = (e.stepT ?? 0) + dt * (sp / 150);
+    if (e.stepT >= 0.42) { e.stepT = 0; audio.step({ x: e.cur.x, y: e.cur.y }, sp > 160); }
   }
 }
 
@@ -285,6 +345,10 @@ input.onKey = (e, down) => {
     } else if (!ui.lobby.hidden) {
       return true;
     } else {
+      // Im Malmodus ist der Chat ausgeblendet - erst den Malmodus schliessen, sonst landen
+      // getippte Buchstaben als Spieltasten (F, R, Q) im Spiel.
+      if (painter?.active) painter.setActive(false);
+      input.reset();
       input.releaseLock();
       ui.chatInput.focus();
     }
@@ -303,11 +367,22 @@ function sendInput() {
   const painting = !!painter?.active;
   const anyAction = !painting && Object.values(a).some(Boolean);
   const none = { up: false, down: false, left: false, right: false, sprint: false, paint: painting };
+  let aim;
+  if (a.primary && !painting && !chatOpen) {
+    // Zielrichtung vom Klick; lag = wie weit der Server die Ziele zurueckspulen soll
+    // (Interpolationspuffer + Netzlaufzeit).
+    const dir = pendingAim ?? renderer.aimFrom(S.pred.x, S.pred.y);
+    aim = { yaw: dir.yaw, pitch: dir.pitch, lag: C.INTERP_DELAY_MS + (net.rtt || 0) };
+  }
+  pendingAim = null;
+  S.predHist.push({ seq: S.seq + 1, x: S.pred.x, y: S.pred.y });
+  if (S.predHist.length > 90) S.predHist.shift();
   net.send({
     t: 'input', seq: ++S.seq,
     look: { yaw: input.look.yaw, pitch: input.look.pitch },
     k: chatOpen || painting ? none : input.keys,
     a: anyAction && !chatOpen ? a : undefined,
+    aim,
   });
 }
 setInterval(sendInput, 1000 / C.INPUT_RATE);
@@ -322,7 +397,8 @@ function frame(now) {
   if (S.inGame && S.pred && S.you && S.map) {
     const y = S.you;
     if (canPredict()) {
-      const sprintAllowed = y.role === C.ROLE_HIDER && input.keys.sprint && y.stamina > 0;
+      // Gleiche Regel wie der Server: Losspurten erst ab Mindestausdauer, dann bis leer.
+      const sprintAllowed = y.role === C.ROLE_HIDER && input.keys.sprint && (y.sprint ? y.stamina > 0 : y.stamina >= C.STAMINA_SPRINT_MIN);
       stepMovement(S.pred, input.keys, dt, S.map, { sprintAllowed, yaw: input.look.yaw });
     } else {
       S.pred.x += (y.x - S.pred.x) * Math.min(1, dt * 12);
@@ -331,11 +407,14 @@ function frame(now) {
     }
     painter?.update(now);
     const speed = Math.hypot(S.pred.vx, S.pred.vy);
+    audio.setListener(S.pred.x, S.pred.y, input.look.yaw);
+    footsteps(dt);
     // Die Figur schaut in Blickrichtung; in Posen behaelt sie ihre Ausrichtung.
     renderer.update({
       dt, now, meId: S.meId, paintMode: !!painter?.active,
       me: {
         x: S.pred.x, y: S.pred.y, yaw: input.look.yaw, pitch: input.look.pitch, role: y.role, alive: y.alive,
+        bodyYaw: y.pose ? (y.poseYaw ?? input.look.yaw) : input.look.yaw,
         pose: y.pose, stun: y.stun, speed, painting: y.painting,
       },
     });
@@ -346,8 +425,32 @@ function frame(now) {
 }
 requestAnimationFrame(frame);
 
-window.addEventListener('blur', () => input.reset());
-document.addEventListener('visibilitychange', () => { if (document.hidden) input.reset(); });
+// Alt+Tab: Tasten und Punktetafel loslassen (das keyup kommt nie an).
+window.addEventListener('blur', () => { input.reset(); hud.scoreboard(false); });
+document.addEventListener('visibilitychange', () => { if (document.hidden) { input.reset(); hud.scoreboard(false); } });
+
+// ---------------------------------------------------------------- Einstellungen (Maus)
+const BASE_SENS = 0.0022;
+function loadSetting(key, fallback) { try { return localStorage.getItem(key) ?? fallback; } catch { return fallback; } }
+function saveSetting(key, v) { try { localStorage.setItem(key, v); } catch { /* egal */ } }
+const sensEl = $('sens'), invEl = $('invert-y'), sensVal = $('sens-val');
+const sens = Math.min(3, Math.max(0.2, Number(loadSetting('cc-sens', '1')) || 1));
+input.sensitivity = BASE_SENS * sens;
+input.invertY = loadSetting('cc-invert', '0') === '1';
+if (sensEl) {
+  sensEl.value = String(sens);
+  if (sensVal) sensVal.textContent = sens.toFixed(2) + '×';
+  sensEl.oninput = () => {
+    const v = Number(sensEl.value) || 1;
+    input.sensitivity = BASE_SENS * v;
+    if (sensVal) sensVal.textContent = v.toFixed(2) + '×';
+    saveSetting('cc-sens', String(v));
+  };
+}
+if (invEl) {
+  invEl.checked = input.invertY;
+  invEl.onchange = () => { input.invertY = invEl.checked; saveSetting('cc-invert', invEl.checked ? '1' : '0'); };
+}
 
 // Fuer automatisierte Browsertests und Fehlersuche in der Konsole.
 window.__cc = { S, renderer, hud, input, get net() { return net; }, get painter() { return painter; } };
