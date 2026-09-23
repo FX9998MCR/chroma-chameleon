@@ -22,7 +22,15 @@ const ui = {
   lowfx: $('lowfx'),
 };
 
-const renderer = new Renderer($('game'), $('labels'));
+let renderer;
+try {
+  renderer = new Renderer($('game'), $('labels'));
+} catch (err) {
+  // WebGL-Kontext liess sich nicht anlegen (Treiber, abgeschaltete Hardwarebeschleunigung, ...).
+  window.__fatal?.('3D-Darstellung konnte nicht gestartet werden: ' + (err?.message ?? err)
+    + '\nBitte im Browser die Hardwarebeschleunigung aktivieren oder den Leistungsmodus (?lowfx=1 an die Adresse anhängen) probieren.');
+  throw err;
+}
 const input = new Input(renderer.renderer.domElement);
 const audio = new Audio();
 const hud = new Hud();
