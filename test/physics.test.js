@@ -155,3 +155,20 @@ test('raycastSolid (2D) trifft Saeule und ignoriert freie Strecke', () => {
   const s = openSpot(m);
   assert.equal(raycastSolid(m, s.x - 10, s.y, s.x + 10, s.y), null);
 });
+
+test('Ecken: wer eine Saeulenecke nur streift, rutscht vorbei statt haengenzubleiben', () => {
+  const map = generateMap(11);
+  let pil = null;
+  for (const a of map.anchors) {
+    const tx = Math.floor(a.x / C.TILE), ty = Math.floor(a.y / C.TILE);
+    let ok = map.tiles[idx(tx, ty)] === C.T_PILLAR;
+    for (let dy = -2; dy <= 2 && ok; dy++) for (let dx = -4; dx <= 2; dx++) if ((dx || dy) && C.SOLID_TILES.has(map.tiles[idx(tx + dx, ty + dy)])) ok = false;
+    if (ok) { pil = { tx, ty }; break; }
+  }
+  assert.ok(pil, 'freistehende Saeule');
+  for (const off of [2, 5, 8]) {
+    const p = { x: (pil.tx - 3) * C.TILE, y: pil.ty * C.TILE - C.PLAYER_RADIUS + off, vx: 0, vy: 0, role: C.ROLE_HIDER };
+    for (let t = 0; t < 60; t++) stepMovement(p, { up: true }, 0.05, map, { yaw: 0 });
+    assert.ok(p.x > (pil.tx + 1) * C.TILE, `Ecke ${off} px gestreift: x=${p.x.toFixed(1)}`);
+  }
+});

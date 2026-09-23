@@ -6,7 +6,7 @@
 import {
   TILE, MAP_W, MAP_H, PLAYER_RADIUS, HIDER_SPEED, HIDER_SPRINT, SEEKER_SPEED, ACCEL, FRICTION,
   BUSH_SLOW, WATER_SLOW, T_BUSH, T_WATER, T_WALL, T_PILLAR, SOLID_TILES,
-  WALL_H_INNER, WALL_H_EDGE, PILLAR_H, ROLE_HIDER, WORLD_W, WORLD_H,
+  WALL_H_INNER, WALL_H_EDGE, PILLAR_H, ROLE_HIDER, WORLD_W, WORLD_H, POSES, BODY_R, BODY_H,
 } from './constants.js';
 import { tileAt, idx, inBounds } from './map.js';
 
@@ -77,8 +77,24 @@ export function circleHitsSolid(map, x, y, r = PLAYER_RADIUS) {
 /**
  * Bewegt einen Kreis um (dx,dy) und schiebt ihn an Waenden entlang.
  */
+const CORNER_NUDGE = 6;   // px: so weit darf eine gestreifte Ecke seitlich ausweichen
+
+/** Kleinster seitlicher Versatz (in Achse ax/ay), bei dem (x,y) frei ist; 0 = keiner. */
+function cornerNudge(map, x, y, ax, ay, max, prefer, r) {
+  for (let s = 1; s <= max; s++) {
+    for (const sg of prefer < 0 ? [-1, 1] : [1, -1]) {
+      if (!circleHitsSolid(map, x + ax * s * sg, y + ay * s * sg, r)) return s * sg;
+    }
+  }
+  return 0;
+}
+
 export function slideMove(map, x, y, dx, dy, r = PLAYER_RADIUS) {
   let nx = x + dx;
+  if (dx !== 0 && circleHitsSolid(map, nx, y, r)) {
+    const k = cornerNudge(map, nx, y, 0, 1, Math.min(CORNER_NUDGE, Math.ceil(Math.abs(dx))), dy, r);
+    if (k !== 0) y += k;
+  }
   if (circleHitsSolid(map, nx, y, r)) {
     const steps = 6;
     let ok = x;
@@ -90,6 +106,10 @@ export function slideMove(map, x, y, dx, dy, r = PLAYER_RADIUS) {
     nx = ok;
   }
   let ny = y + dy;
+  if (dy !== 0 && circleHitsSolid(map, nx, ny, r)) {
+    const k = cornerNudge(map, nx, ny, 1, 0, Math.min(CORNER_NUDGE, Math.ceil(Math.abs(dy))), dx, r);
+    if (k !== 0 && !circleHitsSolid(map, nx + k, ny, r)) nx += k;
+  }
   if (circleHitsSolid(map, nx, ny, r)) {
     const steps = 6;
     let ok = y;
@@ -250,6 +270,25 @@ export function rayHitsCylinder(o, d, cx, cy, radius, height) {
     }
   }
   return null;
+}
+
+/**
+ * Strahl gegen eine Figur in ihrer Pose (Koordinaten in Kacheln/Metern).
+ * Stehende, hockende und sitzende Figuren sind ein Zylinder. Eine liegende Figur
+ * ist lang und flach: Sie liegt entlang ihrer Blickrichtung, Kopf vorn, Beine hinten -
+ * dafuer drei flache Zylinder hintereinander, damit Kopf und Beine auch zaehlen.
+ * @returns {number|null} Distanz entlang des Strahls oder null
+ */
+export function rayHitsBody(o, d, x, y, pose = 0, yaw = 0) {
+  const h = POSES[pose]?.h ?? BODY_H;
+  if (POSES[pose]?.id !== 'lie') return rayHitsCylinder(o, d, x, y, BODY_R, h);
+  const fx = Math.cos(yaw), fy = Math.sin(yaw);
+  let best = null;
+  for (const off of [-0.6, 0, 0.55]) {
+    const t = rayHitsCylinder(o, d, x + fx * off, y + fy * off, 0.3, h);
+    if (t !== null && (best === null || t < best)) best = t;
+  }
+  return best;
 }
 
 /** Erste feste Kachel entlang einer Bodenstrecke (2D, fuer Bots und Sichtlinien). */
