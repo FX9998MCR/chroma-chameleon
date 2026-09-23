@@ -18,11 +18,17 @@ export class Input {
     this.onTogglePaint = null;  // F
     this.onEyedrop = null;      // Leertaste im Malmodus
     this.onWheel = null;        // Mausrad im Malmodus
+    this.onPrimary = null;      // Schuss ausgeloest (Zielpunkt sofort festhalten)
+    this.lockFails = 0;         // verweigerte Pointer-Locks in Folge; ab 3 geht es ohne Lock weiter
+    this.invertY = false;
     this.wantLock = false;
 
     const isTyping = () => {
       const el = document.activeElement;
-      return el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT');
+      if (!el) return false;
+      // Regler und Haken sind kein Tippen - sonst reagieren F, Leertaste und WASD nicht mehr.
+      if (el.tagName === 'INPUT') return !['range', 'checkbox', 'radio', 'button'].includes(el.type);
+      return el.tagName === 'TEXTAREA' || el.tagName === 'SELECT' || el.isContentEditable;
     };
 
     window.addEventListener('keydown', (e) => {
@@ -34,22 +40,24 @@ export class Input {
     });
     window.addEventListener('keyup', (e) => {
       if (this.onKey && this.onKey(e, false) === false) return;
-      if (isTyping()) return;
-      if (this.set(e.code, false)) e.preventDefault();
+      // Loslassen immer verbuchen, auch waehrend der Chat offen ist - sonst laeuft die Figur allein weiter.
+      const handled = this.set(e.code, false);
+      if (handled && !isTyping()) e.preventDefault();
     });
     window.addEventListener('blur', () => this.reset());
 
     document.addEventListener('pointerlockchange', () => {
       this.locked = document.pointerLockElement === canvasEl;
+      if (this.locked) this.lockFails = 0;
       if (!this.locked) this.reset();
     });
-    document.addEventListener('pointerlockerror', () => { this.locked = false; });
+    document.addEventListener('pointerlockerror', () => { this.locked = false; this.lockFails++; });
 
     canvasEl.addEventListener('mousemove', (e) => {
       this.mouse.x = e.clientX; this.mouse.y = e.clientY;
-      if (this.locked && !this.paintMode) {
+      if ((this.locked || this.lockBroken) && !this.paintMode) {
         this.look.yaw += e.movementX * this.sensitivity;
-        this.look.pitch = clamp(this.look.pitch - e.movementY * this.sensitivity, -1.25, 0.95);
+        this.look.pitch = clamp(this.look.pitch - e.movementY * this.sensitivity * (this.invertY ? -1 : 1), -1.25, 0.95);
       } else if (this.paintMode && this.mouse.right) {
         this.mouse.dx += e.movementX;
         this.mouse.dy += e.movementY;
@@ -61,10 +69,11 @@ export class Input {
       if (e.button === 0) {
         this.mouse.left = true;
         if (!this.paintMode) {
-          // Ohne Pointer-Lock erst die Maus fangen; der Klick zaehlt trotzdem als Schuss,
-          // damit das Spiel auch dort funktioniert, wo der Lock verweigert wird.
-          if (!this.locked && this.wantLock) this.requestLock();
-          this.actions.primary = true;
+          // Ohne Pointer-Lock faengt der erste Klick nur die Maus - sonst verpufft ein
+          // Schuss, bevor man ueberhaupt zielen konnte. Verweigert der Browser den Lock,
+          // schiesst der Klick direkt.
+          if (!this.locked && this.wantLock && !this.lockBroken) this.requestLock();
+          else { this.actions.primary = true; this.onPrimary?.(); }
         }
       }
       if (e.button === 2) this.mouse.right = true;
@@ -80,9 +89,18 @@ export class Input {
     }, { passive: false });
   }
 
+  /** Nach mehreren verweigerten Locks spielen wir ohne: Klick schiesst, Maus dreht mit movementX/Y. */
+  get lockBroken() { return this.lockFails >= 3; }
+
   requestLock() {
-    try { this.canvas.requestPointerLock?.({ unadjustedMovement: true })?.catch?.(() => this.canvas.requestPointerLock()); }
-    catch { try { this.canvas.requestPointerLock(); } catch { /* nicht verfuegbar */ } }
+    const el = this.canvas;
+    if (!el.requestPointerLock) { this.lockFails = 3; return; }
+    // Jede Ablehnung abfangen: Chrome verweigert den Lock z. B. kurz nach Esc (SecurityError).
+    const fail = () => { this.locked = false; };
+    const plain = () => { try { el.requestPointerLock()?.catch?.(fail); } catch { fail(); } };
+    try {
+      el.requestPointerLock({ unadjustedMovement: true })?.catch?.((err) => (err?.name === 'NotSupportedError' ? plain() : fail()));
+    } catch { plain(); }
   }
 
   releaseLock() {
