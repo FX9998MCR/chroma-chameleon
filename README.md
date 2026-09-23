@@ -185,6 +185,31 @@ Pinsel, Posen und Animation unverändert.
 Im Menü lässt sich ein Leistungsmodus einschalten (keine Schatten, Pixelratio 1),
 alternativ per URL `?lowfx=1`. Empfohlen für Laptops ohne dedizierte Grafik.
 
+## Fehlersuche
+
+**Nach einem Update (`git pull`) startet das Spiel nicht oder Knöpfe reagieren nicht**
+
+1. Prüfen, ob das Update wirklich angekommen ist: `git log -1 --oneline` muss den
+   neuesten Stand zeigen. Meldet `git pull` *„Your local changes … would be
+   overwritten"* (meist `package-lock.json`), dann
+   `git checkout -- package-lock.json` und erneut `git pull origin main`.
+2. `npm install` ausführen (Abhängigkeiten), danach den Server neu starten:
+   altes Fenster mit Strg+C beenden, `npm start`.
+3. Im Browser die Seite mit **Strg+F5** neu laden (leert den Cache).
+4. Erscheint ein roter Kasten **„Das Spiel konnte nicht gestartet werden"**, steht
+   dort die Ursache (z. B. fehlendes WebGL oder fehlende Dateien). Ohne Kasten:
+   F12 → Reiter „Konsole" öffnen und rote Meldungen prüfen.
+
+**Meldung „Port 3000 ist schon belegt"** – der Server läuft noch in einem anderen
+Fenster. Dort mit Strg+C beenden, oder mit `set PORT=3001` (Windows) bzw.
+`PORT=3001 npm start` einen anderen Port wählen.
+
+**WebGL nicht verfügbar** – im Browser die Hardwarebeschleunigung einschalten
+(Chrome/Edge: Einstellungen → System) oder `?lowfx=1` an die Adresse anhängen.
+
+**Verbindung wird sofort getrennt / „Protokollversion"** – Browser und Server
+passen nicht zusammen: Server neu starten und Seite mit Strg+F5 laden.
+
 ## Lizenz
 
 MIT

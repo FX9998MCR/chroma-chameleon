@@ -13,6 +13,46 @@
 </script>
 </head>
 <body>
+<!-- Fehleranzeige: zeigt Ladefehler (fehlendes WebGL, alte Browser, fehlende Dateien) sichtbar an,
+     statt dass die Seite stumm mit toten Knoepfen dasteht. -->
+<div id="fatal" hidden>
+  <h2>Das Spiel konnte nicht gestartet werden</h2>
+  <p id="fatal-msg"></p>
+  <p class="small">Tipps: Seite mit <kbd>Strg</kbd>+<kbd>F5</kbd> neu laden · im Spielordner <code>npm install</code> ausführen · Server neu starten (<code>npm start</code>).
+  Bleibt die Meldung, bitte den Text oben weitergeben.</p>
+</div>
+<script>
+(function () {
+  var box = document.getElementById('fatal');
+  var msgEl = document.getElementById('fatal-msg');
+  var shown = false;
+  function fatal(text) {
+    if (shown) return;
+    shown = true;
+    msgEl.textContent = text;
+    box.hidden = false;
+  }
+  window.__fatal = fatal;
+  window.addEventListener('error', function (e) {
+    var m = e.message || 'Unbekannter Fehler';
+    if (e.filename) m += '\n(' + e.filename.replace(location.origin, '') + ':' + (e.lineno || 0) + ')';
+    if (/importmap|Failed to resolve module|three/i.test(m)) m += '\nVermutlich fehlt der Ordner node_modules: bitte "npm install" im Spielordner ausführen.';
+    fatal(m);
+  });
+  window.addEventListener('unhandledrejection', function (e) {
+    var r = e.reason;
+    fatal((r && (r.stack || r.message)) || String(r));
+  });
+  if (!(window.HTMLScriptElement && HTMLScriptElement.supports && HTMLScriptElement.supports('importmap'))) {
+    fatal('Dieser Browser ist zu alt (keine Import-Maps). Bitte einen aktuellen Chrome, Edge oder Firefox verwenden.');
+  }
+  try {
+    var c = document.createElement('canvas');
+    var gl = c.getContext('webgl2') || c.getContext('webgl');
+    if (!gl) fatal('WebGL ist in diesem Browser nicht verfügbar oder abgeschaltet. Bitte Hardwarebeschleunigung in den Browser-Einstellungen aktivieren oder einen anderen Browser verwenden.');
+  } catch (err) { fatal('WebGL-Prüfung fehlgeschlagen: ' + (err && err.message)); }
+})();
+</script>
 <div id="game"></div>
 <div id="labels"></div>
 <div id="crosshair" hidden></div>

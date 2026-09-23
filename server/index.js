@@ -55,7 +55,9 @@ function serveStatic(req, res) {
     res.writeHead(200, {
       'Content-Type': MIME[ext] ?? 'application/octet-stream',
       'Content-Length': st.size,
-      'Cache-Control': ext === '.html' ? 'no-cache' : 'public, max-age=3600',
+      // Eigene Dateien nie cachen: nach einem Update darf der Browser keine alten
+      // Skripte mit neuem HTML mischen. Nur die three.js-Bibliothek darf im Cache bleiben.
+      'Cache-Control': route.prefix === '/vendor/three/' ? 'public, max-age=86400' : 'no-cache',
       'X-Content-Type-Options': 'nosniff',
     });
     if (req.method === 'HEAD') { res.end(); return; }
@@ -199,9 +201,25 @@ export function createServer() {
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const PORT = Number(process.env.PORT) || 3000;
   const HOST = process.env.HOST || '0.0.0.0';
+  // Startpruefung: ohne three.js im node_modules-Ordner bleibt der Browser stumm haengen.
+  const threeFile = path.join(ROOT, 'node_modules', 'three', 'build', 'three.module.js');
+  if (!fs.existsSync(threeFile)) {
+    console.error('FEHLER: three.js fehlt (' + threeFile + ').');
+    console.error('Bitte im Spielordner einmal  npm install  ausführen und dann  npm start  erneut starten.');
+    process.exit(1);
+  }
   const { server } = createServer();
   server.listen(PORT, HOST, () => {
-    console.log(`Chroma Chameleon läuft auf http://localhost:${PORT}  (Takt ${C.TICK_RATE} Hz)`);
+    console.log(`Chroma Chameleon läuft auf http://localhost:${PORT}  (Takt ${C.TICK_RATE} Hz, Protokoll v${C.PROTOCOL_VERSION})`);
+    console.log('Im Browser öffnen: http://localhost:' + PORT + '  – bei Problemen: Seite mit Strg+F5 neu laden.');
+  });
+  server.on('error', (err) => {
+    if (err.code === 'EADDRINUSE') {
+      console.error(`FEHLER: Port ${PORT} ist schon belegt – läuft der Server noch in einem anderen Fenster? Dort mit Strg+C beenden.`);
+    } else {
+      console.error('FEHLER beim Start:', err.message);
+    }
+    process.exit(1);
   });
   const shutdown = () => { console.log('\nServer wird beendet …'); server.close(() => process.exit(0)); setTimeout(() => process.exit(0), 1500); };
   process.on('SIGINT', shutdown);
